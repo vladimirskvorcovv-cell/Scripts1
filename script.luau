@@ -36,6 +36,8 @@ local Stats = {
 }
 
 local LatestParse = nil
+local ServerItems = nil
+local ServerItemsVersion = 0
 
 
 local CONFIG_FILE = "GardenParser_config.json"
@@ -102,6 +104,35 @@ local function stockCount(stockStr)
 	if not stockStr then return 0 end
 	local n = string.match(tostring(stockStr), "%d+")
 	return n and tonumber(n) or 0
+end
+
+local function catalogKey(value)
+	return string.lower(tostring(value or ""))
+		:gsub("[’']", "")
+		:gsub("[^%w]+", "")
+end
+
+local function catalogEntry(bucketName, name)
+	local bucket = ServerItems and ServerItems[bucketName]
+	if type(bucket) ~= "table" then return nil end
+	local wanted = catalogKey(name)
+	for key, meta in pairs(bucket) do
+		if type(meta) == "table" then
+			if catalogKey(key) == wanted or catalogKey(meta.en) == wanted or catalogKey(meta.ru) == wanted then
+				return meta
+			end
+		end
+	end
+	return nil
+end
+
+local function itemLabel(bucketName, itemName)
+	local meta = catalogEntry(bucketName, itemName)
+	if meta then
+		local prefix = meta.emoji and (tostring(meta.emoji) .. " ") or ""
+		return prefix .. tostring(meta.ru or meta.en or itemName or "?")
+	end
+	return tostring(itemName or "?")
 end
 
 
@@ -309,6 +340,21 @@ function Net.connect()
 		if sock.OnMessage then
 			safeConnectSignal(sock.OnMessage, function(data)
 				Stats.lastServerMs = os.time()
+				local okDecode, obj = pcall(function()
+					return HttpService:JSONDecode(tostring(data))
+				end)
+				if okDecode and type(obj) == "table" then
+					if obj.type == "ack" then
+						return
+					elseif obj.type == "data" then
+						return
+					elseif obj.type == "items" and type(obj.items) == "table" then
+						ServerItems = obj.items
+						ServerItemsVersion += 1
+						info("Server items catalog loaded")
+						return
+					end
+				end
 				info("Server: " .. tostring(data))
 			end)
 		end
@@ -1141,10 +1187,29 @@ local WX_DEFS = {
 
 local function weatherMeta(name)
 	local low = string.lower(tostring(name or ""))
+	local base = nil
 	for _, d in ipairs(WX_DEFS) do
-		if string.find(low, d.pat, 1, true) then return d end
+		if string.find(low, d.pat, 1, true) then
+			base = d
+			break
+		end
 	end
-	return { emoji = "🌤️", ru = name or "Погода", color = Color3.fromRGB(120, 200, 150), moon = false, fx = {} }
+	base = base or { emoji = "🌤️", ru = name or "Погода", color = Color3.fromRGB(120, 200, 150), moon = false, fx = {} }
+	local meta = catalogEntry("weather", name)
+	if type(meta) ~= "table" then return base end
+	local fx = {}
+	if type(meta.effects) == "table" then
+		for _, text in pairs(meta.effects) do
+			fx[#fx + 1] = tostring(text)
+		end
+	end
+	return {
+		emoji = meta.emoji or base.emoji,
+		ru = meta.ru or meta.en or base.ru,
+		color = base.color,
+		moon = base.moon,
+		fx = (#fx > 0) and fx or base.fx,
+	}
 end
 
 local function copyToClipboard(text)
@@ -1840,7 +1905,7 @@ local function createGUI()
 			end
 			emptyNote.Visible = (#active == 0)
 
-			local keySig = ""
+			local keySig = "V" .. tostring(ServerItemsVersion)
 			for _, a in ipairs(active) do keySig = keySig .. "|" .. tostring(a.name) end
 			if keySig ~= lastKeySig then
 				lastKeySig = keySig
@@ -1965,10 +2030,12 @@ local function createGUI()
 			applyFilter()
 		end)
 
-		local function itemRow(it)
+		local function itemRow(it, bucketName)
 			local watched = isWatched(it.item)
 			local inStock = stockCount(it.stock) > 0
 			local hot = watched and inStock
+			local meta = catalogEntry(bucketName, it.item)
+			local displayName = itemLabel(bucketName, it.item)
 			local row = Instance.new("Frame")
 			row.Size = UDim2.new(1, -4, 0, 30)
 			row.BackgroundColor3 = hot and Color3.fromRGB(30, 46, 37) or C.PANEL
@@ -2006,7 +2073,7 @@ local function createGUI()
 			nameLbl.TextColor3 = C.TEXT
 			nameLbl.TextXAlignment = Enum.TextXAlignment.Left
 			nameLbl.TextTruncate = Enum.TextTruncate.AtEnd
-			nameLbl.Text = it.item or "?"
+			nameLbl.Text = displayName
 			nameLbl.Parent = row
 
 			local infoLbl = Instance.new("TextLabel")
@@ -2019,7 +2086,7 @@ local function createGUI()
 			infoLbl.TextXAlignment = Enum.TextXAlignment.Right
 			local parts = {}
 			if it.stock then table.insert(parts, "x" .. tostring(stockCount(it.stock))) end
-			if it.cost then table.insert(parts, tostring(it.cost)) end
+			if it.cost or (meta and meta.price) then table.insert(parts, tostring(it.cost or meta.price)) end
 			infoLbl.Text = (#parts > 0) and table.concat(parts, "  ·  ") or "-"
 			infoLbl.Parent = row
 
@@ -2030,12 +2097,12 @@ local function createGUI()
 				star.TextColor3 = now and C.YELLOW or C.DIM
 			end)
 
-			rows[#rows + 1] = { frame = row, name = it.item or "" }
+			rows[#rows + 1] = { frame = row, name = (displayName .. " " .. tostring(it.item or "")) }
 		end
 
 
 		local function shopSig(payload)
-			local t = {}
+			local t = { "V" .. tostring(ServerItemsVersion) }
 			local function add(shop, tag)
 				if shop then
 					for _, it in ipairs(shop.items or {}) do
@@ -2082,7 +2149,7 @@ local function createGUI()
 			lastSig = sig
 			clearRows()
 
-			local function section(title, shop)
+			local function section(title, shop, bucketName)
 				if not shop then return end
 
 
@@ -2153,13 +2220,13 @@ local function createGUI()
 						if ha ~= hb then return ha end
 						return tostring(a.item) < tostring(b.item)
 					end)
-					for _, it in ipairs(sorted) do itemRow(it) end
+					for _, it in ipairs(sorted) do itemRow(it, bucketName) end
 				end
 			end
 
-			section("Seeds", payload.seedShop)
-			section("Gear", payload.gearShop)
-			section("Crates", payload.crateShop)
+			section("Seeds", payload.seedShop, "seeds")
+			section("Gear", payload.gearShop, "gear")
+			section("Crates", payload.crateShop, "crates")
 			applyFilter()
 		end
 
@@ -2188,19 +2255,19 @@ local function createGUI()
 				return
 			end
 			local out = { "🌱 Garden Parser — сток" }
-			local function addShop(title, shop)
+			local function addShop(title, shop, bucketName)
 				if not shop then return end
 				out[#out + 1] = ""
 				out[#out + 1] = title .. (shop.restock and ("  (ресток " .. tostring(shop.restock) .. ")") or "")
 				for _, it in ipairs(shop.items or {}) do
 					out[#out + 1] = string.format("  • %s — x%d%s",
-						it.item or "?", stockCount(it.stock),
+						itemLabel(bucketName, it.item), stockCount(it.stock),
 						it.cost and ("  " .. tostring(it.cost)) or "")
 				end
 			end
-			addShop("Seeds", pl.seedShop)
-			addShop("Gear", pl.gearShop)
-			addShop("Crates", pl.crateShop)
+			addShop("Seeds", pl.seedShop, "seeds")
+			addShop("Gear", pl.gearShop, "gear")
+			addShop("Crates", pl.crateShop, "crates")
 			local active = {}
 			for _, w in ipairs(pl.weather or {}) do if w.active then active[#active + 1] = w.name end end
 			for _, m in ipairs(pl.moons or {}) do if m.active then active[#active + 1] = m.name end end
@@ -2922,7 +2989,7 @@ local function createGUI()
 			end
 			if pl then
 				pcall(function() refreshShop(pl) end)
-				local function scan(shop)
+				local function scan(shop, bucketName)
 					if not shop or not shop.items then return end
 					for _, it in ipairs(shop.items) do
 						if it.item and isWatched(it.item) then
@@ -2933,11 +3000,11 @@ local function createGUI()
 								if showToast then
 									local body = "x" .. stockCount(it.stock)
 									if it.cost then body = body .. "  ·  " .. tostring(it.cost) end
-									showToast("In stock: " .. it.item, body, C.GREEN)
+									showToast("In stock: " .. itemLabel(bucketName, it.item), body, C.GREEN)
 								end
 								playAlertSound()
 								Stats.watchHits += 1
-								info("Watchlist hit: " .. it.item)
+								info("Watchlist hit: " .. itemLabel(bucketName, it.item))
 							elseif not avail then
 								watchState[key] = nil
 							end
@@ -2945,9 +3012,9 @@ local function createGUI()
 					end
 				end
 				pcall(function()
-					scan(pl.seedShop)
-					scan(pl.gearShop)
-					scan(pl.crateShop)
+					scan(pl.seedShop, "seeds")
+					scan(pl.gearShop, "gear")
+					scan(pl.crateShop, "crates")
 				end)
 
 
