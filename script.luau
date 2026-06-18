@@ -621,38 +621,28 @@ local MOON_OPCODES = {
 
 local function readMoonPacket(buf, idToName, watched)
 	local len = buffer.len(buf)
+	if len < 1 then return nil, nil end
+
+	-- Packet.RemoteEvent stores the packet id at the start of the buffer. Do not
+	-- scan later bytes: weather payloads can contain 217/218 and fake moon strikes.
 	local candidates = {}
-	local seen = {}
-	local function add(id)
-		if type(id) == "number" and not seen[id] then
-			seen[id] = true
-			candidates[#candidates + 1] = id
-		end
-	end
-	local function addAt(offset)
-		if offset < len then add(buffer.readu8(buf, offset)) end
-		if offset + 1 < len then
-			local a = buffer.readu8(buf, offset)
-			local b = buffer.readu8(buf, offset + 1)
-			add(buffer.readu16(buf, offset))
-			add(a * 256 + b)
-		end
+	if len >= 2 then
+		local a = buffer.readu8(buf, 0)
+		local b = buffer.readu8(buf, 1)
+		candidates[#candidates + 1] = buffer.readu16(buf, 0)
+		candidates[#candidates + 1] = a * 256 + b
+		candidates[#candidates + 1] = a
+	else
+		candidates[#candidates + 1] = buffer.readu8(buf, 0)
 	end
 
-	for offset = 0, math.min(3, len - 1) do
-		addAt(offset)
-	end
-
-	local namedId, namedOp
 	for _, id in ipairs(candidates) do
 		local op = idToName[id]
-		if op and watched[op] then
-			return id, op
-		elseif op and not namedOp then
-			namedId, namedOp = id, op
+		if op then
+			return id, watched[op] and op or nil
 		end
 	end
-	return namedId or candidates[1], namedOp
+	return candidates[1], nil
 end
 
 
