@@ -311,6 +311,24 @@ local function resolveWS()
 		function() return WebSocket and WebSocket.connect end,
 		function() return Websocket and Websocket.connect end,
 		function() return websocket and websocket.connect end,
+		function() return http and http.websocket and http.websocket.connect end,
+	}
+	for _, getter in ipairs(candidates) do
+		local ok, fn = pcall(getter)
+		if ok and typeof(fn) == "function" then
+			return fn
+		end
+	end
+	return nil
+end
+
+local function resolveRequest()
+	local candidates = {
+		function() return request end,
+		function() return http_request end,
+		function() return syn and syn.request end,
+		function() return http and http.request end,
+		function() return fluxus and fluxus.request end,
 	}
 	for _, getter in ipairs(candidates) do
 		local ok, fn = pcall(getter)
@@ -322,10 +340,12 @@ local function resolveWS()
 end
 
 local wsConnect = resolveWS()
+local httpRequest = resolveRequest()
 
 local Net = {}
 Net.socket = nil
 Net.connected = false
+Net.mode = nil
 
 local function safeConnectSignal(signal, handler)
 	if typeof(signal) == "RBXScriptSignal" or (typeof(signal) == "table" and signal.Connect) then
@@ -343,80 +363,104 @@ function Net.close()
 	end
 	Net.socket = nil
 	Net.connected = false
+	Net.mode = nil
 end
 
 function Net.connect()
-	if not wsConnect then
-		errl("This executor has no WebSocket support")
+	if not wsConnect and not httpRequest then
+		errl("This executor has no WebSocket or HTTP request support")
 		return false
 	end
-	if Net.connected and Net.socket then
+	if Net.connected and (Net.socket or Net.mode == "http") then
 		return true
 	end
 
-	local url = string.format("ws://%s:%d", SERVER_IP, SERVER_PORT)
-	info("Connecting to " .. url)
-
-	local sock
-	local ok, err = pcall(function()
-		sock = wsConnect(url)
-	end)
-
-	if not ok then
-		errl("connect() threw: " .. tostring(err))
-		Net.socket = nil
-		Net.connected = false
-		return false
-	end
-	if typeof(sock) ~= "table" and typeof(sock) ~= "userdata" then
-		errl("connect() returned no socket")
-		Net.socket = nil
-		Net.connected = false
-		return false
+	if not wsConnect then
+		Net.connected = true
+		Net.mode = "http"
+		info("WebSocket unavailable; using HTTP POST fallback")
+		return true
 	end
 
-	Net.socket = sock
-	Net.connected = true
-	info("Connected")
+	local urls = {
+		string.format("ws://%s:%d/", SERVER_IP, SERVER_PORT),
+		string.format("ws://%s:%d", SERVER_IP, SERVER_PORT),
+		string.format("wss://%s:%d/", SERVER_IP, SERVER_PORT),
+		string.format("wss://%s:%d", SERVER_IP, SERVER_PORT),
+	}
 
-	pcall(function()
-		if sock.OnMessage then
-			safeConnectSignal(sock.OnMessage, function(data)
-				Stats.lastServerMs = os.time()
-				local okDecode, obj = pcall(function()
-					return HttpService:JSONDecode(tostring(data))
-				end)
-				if okDecode and type(obj) == "table" then
-					if obj.type == "ack" then
-						return
-					elseif obj.type == "data" then
-						return
-					elseif obj.type == "items" and type(obj.items) == "table" then
-						ServerItems = obj.items
-						ServerItemsVersion += 1
-						info("Server items catalog loaded")
-						return
-					end
+	for _, url in ipairs(urls) do
+		info("Connecting to " .. url)
+
+		local sock
+		local ok, err = pcall(function()
+			sock = wsConnect(url)
+		end)
+
+		if not ok then
+			warnl("connect() threw for " .. url .. ": " .. tostring(err))
+		elseif typeof(sock) == "table" or typeof(sock) == "userdata" then
+			Net.socket = sock
+			Net.connected = true
+			Net.mode = "ws"
+			info("Connected")
+
+			pcall(function()
+				if sock.OnMessage then
+					safeConnectSignal(sock.OnMessage, function(data)
+						Stats.lastServerMs = os.time()
+						local okDecode, obj = pcall(function()
+							return HttpService:JSONDecode(tostring(data))
+						end)
+						if okDecode and type(obj) == "table" then
+							if obj.type == "ack" then
+								return
+							elseif obj.type == "data" then
+								return
+							elseif obj.type == "items" and type(obj.items) == "table" then
+								ServerItems = obj.items
+								ServerItemsVersion += 1
+								info("Server items catalog loaded")
+								return
+							end
+						end
+						info("Server: " .. tostring(data))
+					end)
 				end
-				info("Server: " .. tostring(data))
 			end)
-		end
-	end)
-	pcall(function()
-		if sock.OnClose then
-			safeConnectSignal(sock.OnClose, function()
-				warnl("Socket closed by server")
-				Net.connected = false
-				Net.socket = nil
+			pcall(function()
+				if sock.OnClose then
+					safeConnectSignal(sock.OnClose, function()
+						warnl("Socket closed by server")
+						Net.connected = false
+						Net.socket = nil
+						Net.mode = nil
+					end)
+				end
 			end)
-		end
-	end)
 
-	return true
+			return true
+		else
+			warnl("connect() returned no socket for " .. url)
+		end
+	end
+
+	if httpRequest then
+		Net.socket = nil
+		Net.connected = true
+		Net.mode = "http"
+		info("WebSocket failed; using HTTP POST fallback")
+		return true
+	end
+
+	Net.socket = nil
+	Net.connected = false
+	Net.mode = nil
+	return false
 end
 
 function Net.send(payload)
-	if not Net.connected or not Net.socket then
+	if not Net.connected then
 		return false
 	end
 	local okEncode, encoded = pcall(function()
@@ -426,6 +470,42 @@ function Net.send(payload)
 		errl("encode failed: " .. tostring(encoded))
 		return false
 	end
+	if Net.mode == "http" then
+		if not httpRequest then
+			Net.connected = false
+			Net.mode = nil
+			Net.socket = nil
+			return false
+		end
+		local url = string.format("http://%s:%d/ingest", SERVER_IP, SERVER_PORT)
+		local okHttp, res = pcall(function()
+			return httpRequest({
+				Url = url,
+				Method = "POST",
+				Headers = { ["Content-Type"] = "application/json" },
+				Body = encoded,
+			})
+		end)
+		if not okHttp then
+			warnl("http send failed: " .. tostring(res))
+			Net.connected = false
+			Net.mode = nil
+			return false
+		end
+		local status = type(res) == "table" and tonumber(res.StatusCode or res.status_code or res.Status) or 200
+		if status and (status < 200 or status >= 300) then
+			warnl("http send failed: status " .. tostring(status))
+			Net.connected = false
+			Net.mode = nil
+			Net.socket = nil
+			return false
+		end
+		Stats.lastServerMs = os.time()
+		return true
+	end
+	if not Net.socket then
+		return false
+	end
 	local okSend, sendErr = pcall(function()
 		Net.socket:Send(encoded)
 	end)
@@ -433,6 +513,7 @@ function Net.send(payload)
 		warnl("send failed: " .. tostring(sendErr))
 		Net.connected = false
 		Net.socket = nil
+		Net.mode = nil
 		return false
 	end
 	return true
@@ -913,8 +994,8 @@ task.spawn(function()
 
 	pcall(setupMoonListener)
 
-	if not wsConnect then
-		errl("Aborting: no WebSocket API")
+	if not wsConnect and not httpRequest then
+		errl("Aborting: no WebSocket or HTTP request API")
 		return
 	end
 
