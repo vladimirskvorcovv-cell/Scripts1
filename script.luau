@@ -102,8 +102,24 @@ end
 
 local function stockCount(stockStr)
 	if not stockStr then return 0 end
-	local n = string.match(tostring(stockStr), "%d+")
+	local s = tostring(stockStr)
+	if string.match(string.lower(s), "no%s*stock") then return 0 end
+	local n = string.match(s, "[xX]%s*(%d+)")
+		or string.match(s, "(%d+)%s*[xX]")
+		or string.match(s, "%d+")
 	return n and tonumber(n) or 0
+end
+
+local function cleanText(value)
+	if value == nil then return nil end
+	local s = tostring(value):gsub("%s+", " ")
+	s = s:gsub("^%s+", ""):gsub("%s+$", "")
+	if s == "" then return nil end
+	return s
+end
+
+local function nameKey(value)
+	return string.lower(tostring(value or "")):gsub("[%s_%-]+", "")
 end
 
 local function catalogKey(value)
@@ -329,6 +345,10 @@ local function resolveRequest()
 		function() return syn and syn.request end,
 		function() return http and http.request end,
 		function() return fluxus and fluxus.request end,
+		function() return krnl and krnl.request end,
+		function() return electron and electron.request end,
+		function() return httprequest end,
+		function() return HttpPost end,
 	}
 	for _, getter in ipairs(candidates) do
 		local ok, fn = pcall(getter)
@@ -481,31 +501,36 @@ function Net.send(payload, preEncoded)
 			Net.socket = nil
 			return false
 		end
-		local url = string.format("http://%s:%d/ingest", SERVER_IP, SERVER_PORT)
-		local okHttp, res = pcall(function()
-			return httpRequest({
-				Url = url,
-				Method = "POST",
-				Headers = { ["Content-Type"] = "application/json" },
-				Body = encoded,
-			})
-		end)
-		if not okHttp then
-			warnl("http send failed: " .. tostring(res))
-			Net.connected = false
-			Net.mode = nil
-			return false
+		local urls = {
+			string.format("https://%s:%d/ingest", SERVER_IP, SERVER_PORT),
+			string.format("http://%s:%d/ingest", SERVER_IP, SERVER_PORT),
+		}
+		local lastErr = nil
+		for _, url in ipairs(urls) do
+			local okHttp, res = pcall(function()
+				return httpRequest({
+					Url = url,
+					Method = "POST",
+					Headers = { ["Content-Type"] = "application/json" },
+					Body = encoded,
+				})
+			end)
+			if okHttp then
+				local status = type(res) == "table" and tonumber(res.StatusCode or res.status_code or res.Status) or 200
+				if not status or (status >= 200 and status < 300) then
+					Stats.lastServerMs = os.time()
+					return true, encoded
+				end
+				lastErr = "status " .. tostring(status) .. " from " .. url
+			else
+				lastErr = tostring(res) .. " from " .. url
+			end
 		end
-		local status = type(res) == "table" and tonumber(res.StatusCode or res.status_code or res.Status) or 200
-		if status and (status < 200 or status >= 300) then
-			warnl("http send failed: status " .. tostring(status))
-			Net.connected = false
-			Net.mode = nil
-			Net.socket = nil
-			return false
-		end
-		Stats.lastServerMs = os.time()
-		return true, encoded
+		warnl("http send failed: " .. tostring(lastErr))
+		Net.connected = false
+		Net.mode = nil
+		Net.socket = nil
+		return false
 	end
 	if not Net.socket then
 		return false
@@ -539,7 +564,7 @@ local function readText(inst)
 		return inst.Text
 	end)
 	if ok and typeof(value) == "string" then
-		return value
+		return cleanText(value)
 	end
 	return nil
 end
@@ -561,9 +586,178 @@ local SKIP_NAMES = {
 	ItemTemplate = true,
 	Sheckles_Shelf = true,
 	Robux_Shelf = true,
+	Header = true,
+	Footer = true,
 }
 
-local function parseShopContainer(container)
+local GENERIC_ITEM_NAMES = {
+	Frame = true,
+	Main = true,
+	MainFrame = true,
+	Main_Frame = true,
+	ScrollingFrame = true,
+	Container = true,
+	Content = true,
+	Items = true,
+	ShopItems = true,
+}
+
+local ITEM_NAME_FIELDS = {
+	"Seed_Text", "Item_Text", "ItemName", "Item_Name", "Item_Name_Text",
+	"Name_Text", "NameLabel", "Name", "Title", "Title_Text",
+}
+
+local STOCK_FIELDS = {
+	"Stock_Text", "StockText", "Stock", "Stock_Label", "StockLabel",
+	"Amount_Text", "Amount", "Quantity", "Quantity_Text", "Count", "Count_Text",
+}
+
+local COST_FIELDS = {
+	"Cost_Text", "CostText", "Cost", "Price_Text", "PriceText", "Price",
+}
+
+local RARITY_FIELDS = {
+	"Rarity_Text", "RarityText", "Rarity", "Tier_Text", "TierText", "Tier",
+}
+
+local RARITY_NAMES = {
+	common = true,
+	uncommon = true,
+	rare = true,
+	epic = true,
+	legendary = true,
+	mythic = true,
+	super = true,
+	divine = true,
+	prismatic = true,
+	transcendent = true,
+}
+
+local function findNamedDescendant(parent, names)
+	if not parent then return nil end
+	for _, name in ipairs(names) do
+		local direct = parent:FindFirstChild(name)
+		if direct then return direct end
+	end
+	for _, name in ipairs(names) do
+		local found = parent:FindFirstChild(name, true)
+		if found then return found end
+	end
+	return nil
+end
+
+local function fieldAny(parent, names)
+	return readText(findNamedDescendant(parent, names))
+end
+
+local function collectTexts(root)
+	local out = {}
+	local function add(inst)
+		local text = readText(inst)
+		if text then
+			out[#out + 1] = { text = text, name = inst.Name }
+		end
+	end
+	add(root)
+	local ok, desc = pcall(function() return root:GetDescendants() end)
+	if ok then
+		for _, inst in ipairs(desc) do
+			add(inst)
+		end
+	end
+	return out
+end
+
+local function isStockText(text)
+	local s = string.lower(tostring(text or ""))
+	return string.match(s, "no%s*stock") ~= nil
+		or string.match(s, "[xX]%s*%d+") ~= nil
+		or string.match(s, "%d+%s*[xX]") ~= nil
+		or (string.find(s, "stock", 1, true) and string.match(s, "%d+")) ~= nil
+end
+
+local function isCostText(text)
+	local s = string.lower(tostring(text or ""))
+	return string.find(s, "sheckle", 1, true) ~= nil
+		or string.find(s, "price", 1, true) ~= nil
+		or string.match(s, "^%s*%$?%d[%d%.,]*%s*[kmb]?") ~= nil
+end
+
+local function isRarityText(text)
+	return RARITY_NAMES[string.lower(tostring(text or ""))] == true
+end
+
+local function isBadNameText(text)
+	local s = string.lower(tostring(text or ""))
+	return s == "buy" or s == "gift" or s == "owned" or s == "stock"
+		or string.find(s, "robux", 1, true) ~= nil
+		or string.find(s, "refresh", 1, true) ~= nil
+		or isStockText(text) or isCostText(text) or isRarityText(text)
+end
+
+local function pickShopText(texts, predicate)
+	for _, entry in ipairs(texts) do
+		if predicate(entry.text) then
+			return entry.text
+		end
+	end
+	return nil
+end
+
+local function pickItemName(root, texts, bucketName)
+	local named = fieldAny(root, ITEM_NAME_FIELDS)
+	if named and not isBadNameText(named) then return named end
+
+	if not GENERIC_ITEM_NAMES[root.Name] then
+		local meta = catalogEntry(bucketName, root.Name)
+		if meta then return tostring(meta.en or meta.ru or root.Name) end
+	end
+
+	for _, entry in ipairs(texts) do
+		if not isBadNameText(entry.text) then
+			local meta = catalogEntry(bucketName, entry.text)
+			if meta then return tostring(meta.en or meta.ru or entry.text) end
+		end
+	end
+
+	for _, entry in ipairs(texts) do
+		if not isBadNameText(entry.text) and #entry.text <= 64 then
+			return entry.text
+		end
+	end
+
+	if not GENERIC_ITEM_NAMES[root.Name] then
+		return root.Name
+	end
+	return nil
+end
+
+local function parseShopItem(root, bucketName)
+	local main = root:FindFirstChild("Main_Frame")
+		or root:FindFirstChild("MainFrame")
+		or root:FindFirstChild("Main")
+		or root
+	local texts = collectTexts(main)
+	local stock = fieldAny(main, STOCK_FIELDS) or pickShopText(texts, isStockText)
+	local name = pickItemName(main, texts, bucketName)
+	local cost = fieldAny(main, COST_FIELDS) or pickShopText(texts, isCostText)
+	local rarity = nested(main, "Rarity", "Rarity_Text")
+		or fieldAny(main, RARITY_FIELDS)
+		or pickShopText(texts, isRarityText)
+
+	if not name and not stock then return nil end
+	local n = stockCount(stock)
+	return {
+		item = name or root.Name,
+		stock = stock,
+		cost = cost,
+		rarity = rarity,
+		stockNum = n,
+		inStock = n > 0,
+	}
+end
+
+local function parseShopContainer(container, bucketName)
 	local items = {}
 	if not container then return items end
 	local ok, children = pcall(function()
@@ -573,20 +767,9 @@ local function parseShopContainer(container)
 	for _, child in ipairs(children) do
 		if not SKIP_NAMES[child.Name] and not child:IsA("UIComponent")
 			and not child:IsA("UILayout") and not child:IsA("UIBase") then
-			local main = child:FindFirstChild("Main_Frame")
-			if main then
-				local name = field(main, "Seed_Text")
-				local stock = field(main, "Stock_Text")
-				if name or stock then
-					table.insert(items, {
-						item = name or child.Name,
-						stock = stock,
-						cost = field(main, "Cost_Text"),
-						rarity = nested(main, "Rarity", "Rarity_Text"),
-						stockNum = stockCount(stock),
-						inStock = stockCount(stock) > 0,
-					})
-				end
+			local item = parseShopItem(child, bucketName)
+			if item then
+				table.insert(items, item)
 			end
 		end
 	end
@@ -611,7 +794,7 @@ local function parseSeedShop(pg)
 	return {
 		restock = restock,
 		restockSeconds = parseDuration(restock),
-		items = parseShopContainer(frame:FindFirstChild("NormalShop")),
+		items = parseShopContainer(frame:FindFirstChild("NormalShop"), "seeds"),
 	}
 end
 
@@ -624,7 +807,7 @@ local function parseGearShop(pg)
 	return {
 		restock = restock,
 		restockSeconds = parseDuration(restock),
-		items = parseShopContainer(frame:FindFirstChild("ScrollingFrame")),
+		items = parseShopContainer(frame:FindFirstChild("ScrollingFrame"), "gear"),
 	}
 end
 
@@ -637,7 +820,7 @@ local function parseCrateShop(pg)
 	return {
 		restock = restock,
 		restockSeconds = parseDuration(restock),
-		items = parseShopContainer(frame:FindFirstChild("ScrollingFrame")),
+		items = parseShopContainer(frame:FindFirstChild("ScrollingFrame"), "crates"),
 	}
 end
 
