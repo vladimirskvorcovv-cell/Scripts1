@@ -118,10 +118,6 @@ local function cleanText(value)
 	return s
 end
 
-local function nameKey(value)
-	return string.lower(tostring(value or "")):gsub("[%s_%-]+", "")
-end
-
 local function catalogKey(value)
 	return string.lower(tostring(value or ""))
 		:gsub("[’']", "")
@@ -366,6 +362,7 @@ local Net = {}
 Net.socket = nil
 Net.connected = false
 Net.mode = nil
+Net.httpUrl = nil
 
 local function safeConnectSignal(signal, handler)
 	if typeof(signal) == "RBXScriptSignal" or (typeof(signal) == "table" and signal.Connect) then
@@ -505,6 +502,9 @@ function Net.send(payload, preEncoded)
 			string.format("https://%s:%d/ingest", SERVER_IP, SERVER_PORT),
 			string.format("http://%s:%d/ingest", SERVER_IP, SERVER_PORT),
 		}
+		if Net.httpUrl and Net.httpUrl ~= urls[1] then
+			table.insert(urls, 1, Net.httpUrl)
+		end
 		local lastErr = nil
 		for _, url in ipairs(urls) do
 			local okHttp, res = pcall(function()
@@ -518,6 +518,7 @@ function Net.send(payload, preEncoded)
 			if okHttp then
 				local status = type(res) == "table" and tonumber(res.StatusCode or res.status_code or res.Status) or 200
 				if not status or (status >= 200 and status < 300) then
+					Net.httpUrl = url
 					Stats.lastServerMs = os.time()
 					return true, encoded
 				end
@@ -633,21 +634,19 @@ local RARITY_NAMES = {
 	transcendent = true,
 }
 
-local function findNamedDescendant(parent, names)
+local function fieldAny(parent, names)
 	if not parent then return nil end
 	for _, name in ipairs(names) do
 		local direct = parent:FindFirstChild(name)
-		if direct then return direct end
+		local text = readText(direct)
+		if text then return text end
 	end
 	for _, name in ipairs(names) do
 		local found = parent:FindFirstChild(name, true)
-		if found then return found end
+		local text = readText(found)
+		if text then return text end
 	end
 	return nil
-end
-
-local function fieldAny(parent, names)
-	return readText(findNamedDescendant(parent, names))
 end
 
 local function collectTexts(root)
@@ -680,7 +679,8 @@ local function isCostText(text)
 	local s = string.lower(tostring(text or ""))
 	return string.find(s, "sheckle", 1, true) ~= nil
 		or string.find(s, "price", 1, true) ~= nil
-		or string.match(s, "^%s*%$?%d[%d%.,]*%s*[kmb]?") ~= nil
+		or string.find(s, "¢", 1, true) ~= nil
+		or string.match(s, "^%s*%$%s*%d") ~= nil
 end
 
 local function isRarityText(text)
@@ -757,6 +757,13 @@ local function parseShopItem(root, bucketName)
 	}
 end
 
+local function shouldSkipShopChild(child)
+	return SKIP_NAMES[child.Name]
+		or child:IsA("UIComponent")
+		or child:IsA("UILayout")
+		or child:IsA("UIBase")
+end
+
 local function parseShopContainer(container, bucketName)
 	local items = {}
 	if not container then return items end
@@ -765,12 +772,41 @@ local function parseShopContainer(container, bucketName)
 	end)
 	if not ok then return items end
 	for _, child in ipairs(children) do
-		if not SKIP_NAMES[child.Name] and not child:IsA("UIComponent")
-			and not child:IsA("UILayout") and not child:IsA("UIBase") then
+		if not shouldSkipShopChild(child) then
 			local item = parseShopItem(child, bucketName)
 			if item then
 				table.insert(items, item)
 			end
+		end
+	end
+
+	if #items <= 3 then
+		local fallback = {}
+		local seen = {}
+		local okDesc, desc = pcall(function() return container:GetDescendants() end)
+		if okDesc then
+			for _, inst in ipairs(desc) do
+				local root = nil
+				if inst.Name == "Main_Frame" or inst.Name == "MainFrame" or inst.Name == "Main" then
+					root = inst.Parent
+				else
+					local text = readText(inst)
+					if text and isStockText(text) then
+						root = inst:FindFirstAncestor("Main_Frame")
+							or inst:FindFirstAncestor("MainFrame")
+							or inst:FindFirstAncestor("Main")
+						if root then root = root.Parent end
+					end
+				end
+				if root and root ~= container and not seen[root] and not shouldSkipShopChild(root) then
+					seen[root] = true
+					local item = parseShopItem(root, bucketName)
+					if item then table.insert(fallback, item) end
+				end
+			end
+		end
+		if #fallback > #items then
+			items = fallback
 		end
 	end
 	return items
