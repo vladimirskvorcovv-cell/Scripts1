@@ -403,10 +403,10 @@ function Net.connect()
 	end
 
 	local urls = {
-		string.format("ws://%s:%d/", SERVER_IP, SERVER_PORT),
-		string.format("ws://%s:%d", SERVER_IP, SERVER_PORT),
 		string.format("wss://%s:%d/", SERVER_IP, SERVER_PORT),
 		string.format("wss://%s:%d", SERVER_IP, SERVER_PORT),
+		string.format("ws://%s:%d/", SERVER_IP, SERVER_PORT),
+		string.format("ws://%s:%d", SERVER_IP, SERVER_PORT),
 	}
 
 	for _, url in ipairs(urls) do
