@@ -2,7 +2,7 @@
 
 local SERVER_IP = "89.125.169.199"
 local SERVER_PORT = 443
-local PARSE_INTERVAL = 1
+local PARSE_INTERVAL = 0.1
 local START_DELAY = 1
 local RECONNECT_DELAY = 5
 
@@ -459,16 +459,20 @@ function Net.connect()
 	return false
 end
 
-function Net.send(payload)
+function Net.send(payload, preEncoded)
 	if not Net.connected then
 		return false
 	end
-	local okEncode, encoded = pcall(function()
-		return HttpService:JSONEncode(payload)
-	end)
-	if not okEncode then
-		errl("encode failed: " .. tostring(encoded))
-		return false
+	local encoded = preEncoded
+	if not encoded then
+		local okEncode, result = pcall(function()
+			return HttpService:JSONEncode(payload)
+		end)
+		if not okEncode then
+			errl("encode failed: " .. tostring(result))
+			return false
+		end
+		encoded = result
 	end
 	if Net.mode == "http" then
 		if not httpRequest then
@@ -501,7 +505,7 @@ function Net.send(payload)
 			return false
 		end
 		Stats.lastServerMs = os.time()
-		return true
+		return true, encoded
 	end
 	if not Net.socket then
 		return false
@@ -516,7 +520,7 @@ function Net.send(payload)
 		Net.mode = nil
 		return false
 	end
-	return true
+	return true, encoded
 end
 
 local function getPlayerGui()
@@ -976,6 +980,7 @@ local function buildPayload()
 end
 
 local Running = true
+local lastEncodedPayload = nil
 
 safeConnectSignal(LocalPlayer.AncestryChanged, function(_, parent)
 	if parent == nil then
@@ -1012,15 +1017,19 @@ task.spawn(function()
 			local okLoop, loopErr = pcall(function()
 				local payload = buildPayload()
 				if payload then
+					local okEncode, encoded = pcall(function()
+						return HttpService:JSONEncode(payload)
+					end)
+					if not okEncode then
+						errl("encode failed: " .. tostring(encoded))
+						return
+					end
+					if encoded == lastEncodedPayload then return end
+					lastEncodedPayload = encoded
 					LatestParse = payload
-					if Net.send(payload) then
-						local seeds = (payload.seedShop and #payload.seedShop.items) or 0
-						local gears = (payload.gearShop and #payload.gearShop.items) or 0
-						local weathers = (payload.weather and #payload.weather) or 0
-						local moonsActive = (payload.counts and payload.counts.moonsActive) or 0
+					if Net.send(nil, encoded) then
 						Stats.sentPackets += 1
-						Stats.itemsFound = seeds + gears
-						info(string.format("Sent: %d seeds, %d gear, %d weather, %d moon", seeds, gears, weathers, moonsActive))
+						Stats.itemsFound = (payload.seedShop and #payload.seedShop.items or 0) + (payload.gearShop and #payload.gearShop.items or 0)
 					end
 				else
 					warnl("PlayerGui not ready / parse skipped")
@@ -1295,6 +1304,7 @@ local WX_DEFS = {
 	{ pat = "rainbow", emoji = "🌈", ru = "Радуга",        color = Color3.fromRGB(180, 150, 240), moon = false, fx = { "Радужная мутация" } },
 	{ pat = "thunder", emoji = "⛈️", ru = "Гроза",         color = Color3.fromRGB(167, 139, 250), moon = false, fx = { "Молнии", "Электро-мутация" } },
 	{ pat = "light",   emoji = "⚡",  ru = "Молния",        color = Color3.fromRGB(167, 139, 250), moon = false, fx = { "Электро-мутация" } },
+	{ pat = "aurora",  emoji = "🌌", ru = "Северное сияние", color = Color3.fromRGB(120, 180, 255), moon = false, fx = { "Аврора-мутация" } },
 	{ pat = "blizz",   emoji = "🌨️", ru = "Метель",        color = Color3.fromRGB(147, 197, 253), moon = false, fx = { "Заморозка" } },
 	{ pat = "snow",    emoji = "❄️", ru = "Снегопад",      color = Color3.fromRGB(186, 230, 253), moon = false, fx = { "Заморозка" } },
 	{ pat = "frost",   emoji = "🧊", ru = "Мороз",          color = Color3.fromRGB(125, 211, 252), moon = false, fx = { "Заморозка" } },
@@ -2342,9 +2352,9 @@ local function createGUI()
 				end
 			end
 
-			section("Seeds", payload.seedShop, "seeds")
-			section("Gear", payload.gearShop, "gear")
-			section("Crates", payload.crateShop, "crates")
+			section("Семена", payload.seedShop, "seeds")
+			section("Инструменты", payload.gearShop, "gear")
+			section("Ящики", payload.crateShop, "crates")
 			applyFilter()
 		end
 
@@ -2383,9 +2393,9 @@ local function createGUI()
 						it.cost and ("  " .. tostring(it.cost)) or "")
 				end
 			end
-			addShop("Seeds", pl.seedShop, "seeds")
-			addShop("Gear", pl.gearShop, "gear")
-			addShop("Crates", pl.crateShop, "crates")
+		addShop("Семена", pl.seedShop, "seeds")
+		addShop("Инструменты", pl.gearShop, "gear")
+		addShop("Ящики", pl.crateShop, "crates")
 			local active = {}
 			for _, w in ipairs(pl.weather or {}) do if w.active then active[#active + 1] = w.name end end
 			for _, m in ipairs(pl.moons or {}) do if m.active then active[#active + 1] = m.name end end
