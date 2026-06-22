@@ -5,7 +5,6 @@ local SERVER_PORT = 443
 local PARSE_INTERVAL = 0.1
 local SHOP_PARSE_INTERVAL = 1
 local FRUIT_PRICE_PARSE_INTERVAL = 1
-local HEARTBEAT_SEND_INTERVAL = PARSE_INTERVAL
 local START_DELAY = 1
 local RECONNECT_DELAY = 5
 
@@ -1386,15 +1385,12 @@ local function buildPayload()
 			type = "data",
 			ts = now.UnixTimestamp,
 			tsMs = now.UnixTimestampMillis,
-			player = LocalPlayer.Name,
-			userId = LocalPlayer.UserId,
 			weather = weather,
 			moons = moons,
 			seedShop = seedShop,
 			gearShop = gearShop,
 			crateShop = crateShop,
 			fruitPriceStock = fruitPriceStock,
-			gardenLevel = safeParse("gardenLevel", function() return parseGardenLevel(pg) end),
 			isNight = isNight,
 			dayPhase = isNight and "Night" or "Day",
 			counts = {
@@ -1417,8 +1413,50 @@ local function buildPayload()
 end
 
 local Running = true
-local lastPayloadSignature = nil
-local lastPayloadSentAt = 0
+local sentInitialSnapshot = false
+local lastFieldSignatures = {}
+local PATCH_FIELDS = {
+	"weather", "moons", "seedShop", "gearShop", "crateShop",
+	"fruitPriceStock", "isNight", "dayPhase", "counts",
+}
+
+local function buildOutboundPayload(payload)
+	if not sentInitialSnapshot then
+		local signatures = {}
+		for _, field in ipairs(PATCH_FIELDS) do
+			local ok, sig = pcall(function()
+				return HttpService:JSONEncode(payload[field])
+			end)
+			if ok then signatures[field] = sig end
+		end
+		local ok, encoded = pcall(function()
+			return HttpService:JSONEncode(payload)
+		end)
+		return ok, encoded, signatures, true
+	end
+
+	local patch = {
+		type = "patch",
+		ts = payload.ts,
+		tsMs = payload.tsMs,
+	}
+	local signatures = {}
+	for _, field in ipairs(PATCH_FIELDS) do
+		local ok, sig = pcall(function()
+			return HttpService:JSONEncode(payload[field])
+		end)
+		if ok then
+			signatures[field] = sig
+			if sig ~= lastFieldSignatures[field] then
+				patch[field] = payload[field]
+			end
+		end
+	end
+	local ok, encoded = pcall(function()
+		return HttpService:JSONEncode(patch)
+	end)
+	return ok, encoded, signatures, false
+end
 
 safeConnectSignal(LocalPlayer.AncestryChanged, function(_, parent)
 	if parent == nil then
@@ -1455,37 +1493,17 @@ end)
 			local okLoop, loopErr = pcall(function()
 				local payload = buildPayload()
 				if payload then
-					local ts = payload.ts
-					local tsMs = payload.tsMs
-					payload.ts = nil
-					payload.tsMs = nil
-					local okSig, signature = pcall(function()
-						return HttpService:JSONEncode(payload)
-					end)
-					payload.ts = ts
-					payload.tsMs = tsMs
-					if not okSig then
-						errl("signature encode failed: " .. tostring(signature))
-						return
-					end
-
-					local nowSend = os.clock()
-					if signature == lastPayloadSignature and (nowSend - lastPayloadSentAt) < HEARTBEAT_SEND_INTERVAL then
-						LatestParse = payload
-						return
-					end
-
-					local okEncode, encoded = pcall(function()
-						return HttpService:JSONEncode(payload)
-					end)
+					local okEncode, encoded, signatures, isInitial = buildOutboundPayload(payload)
 					if not okEncode then
 						errl("encode failed: " .. tostring(encoded))
 						return
 					end
 					LatestParse = payload
 					if Net.send(nil, encoded) then
-						lastPayloadSignature = signature
-						lastPayloadSentAt = nowSend
+						if isInitial then sentInitialSnapshot = true end
+						for field, sig in pairs(signatures or {}) do
+							lastFieldSignatures[field] = sig
+						end
 						Stats.sentPackets += 1
 						Stats.itemsFound = (payload.seedShop and #payload.seedShop.items or 0) + (payload.gearShop and #payload.gearShop.items or 0)
 					end
