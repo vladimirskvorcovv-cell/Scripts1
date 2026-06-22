@@ -5,6 +5,7 @@ local SERVER_PORT = 443
 local PARSE_INTERVAL = 0.1
 local SHOP_PARSE_INTERVAL = 1
 local FRUIT_PRICE_PARSE_INTERVAL = 1
+local FULL_SNAPSHOT_INTERVAL = 5
 local START_DELAY = 1
 local RECONNECT_DELAY = 5
 
@@ -1129,15 +1130,6 @@ local function parseWeather(pg)
 	return out
 end
 
-local function parseGardenLevel(pg)
-	local gl = pg:FindFirstChild("GardenLevel")
-	if not gl then return nil end
-	local mf = gl:FindFirstChild("MainFrame")
-	if not mf then return nil end
-	return field(mf, "TextLabel")
-end
-
-
 local MOON_STRIKE_TTL = 90
 local MOON_BLOOD_TTL  = 20 * 60
 local MOON_DEBUG = false
@@ -1414,6 +1406,7 @@ end
 
 local Running = true
 local sentInitialSnapshot = false
+local lastFullSnapshotAt = 0
 local lastFieldSignatures = {}
 local PATCH_FIELDS = {
 	"weather", "moons", "seedShop", "gearShop", "crateShop",
@@ -1421,7 +1414,8 @@ local PATCH_FIELDS = {
 }
 
 local function buildOutboundPayload(payload)
-	if not sentInitialSnapshot then
+	local now = os.clock()
+	if not sentInitialSnapshot or (now - lastFullSnapshotAt) >= FULL_SNAPSHOT_INTERVAL then
 		local signatures = {}
 		for _, field in ipairs(PATCH_FIELDS) do
 			local ok, sig = pcall(function()
@@ -1500,7 +1494,10 @@ end)
 					end
 					LatestParse = payload
 					if Net.send(nil, encoded) then
-						if isInitial then sentInitialSnapshot = true end
+						if isInitial then
+							sentInitialSnapshot = true
+							lastFullSnapshotAt = os.clock()
+						end
 						for field, sig in pairs(signatures or {}) do
 							lastFieldSignatures[field] = sig
 						end
