@@ -51,6 +51,9 @@ local PayloadCache = {
 	nextFruitParseAt = 0,
 }
 
+local FruitPriceParseVersion = 0
+local LastSentFruitPriceParseVersion = 0
+
 
 local CONFIG_FILE = "GardenParser_config.json"
 local _hasFileIO = (typeof(writefile) == "function"
@@ -661,6 +664,15 @@ local function fieldAny(parent, names)
 	return nil
 end
 
+local function attributeText(inst, name)
+	if not inst then return nil end
+	local ok, value = pcall(function()
+		return inst:GetAttribute(name)
+	end)
+	if ok then return cleanText(value) end
+	return nil
+end
+
 local function collectTexts(root)
 	local out = {}
 	local function add(inst)
@@ -996,7 +1008,8 @@ local function parseFruitPriceItem(root, index)
 	local texts = collectTexts(root)
 	local multiplier = fieldAny(root, { "Multiplier", "Multiplier_Text", "Percent", "Percent_Text" })
 		or pickShopText(texts, isMultiplierText)
-	local name = fieldAny(root, { "FruitName", "ItemName", "Item_Name", "NameLabel", "Name", "Title", "Seed_Text" })
+	local name = attributeText(root, "SeedToolTip")
+		or fieldAny(root, { "FruitName", "ItemName", "Item_Name", "NameLabel", "Name", "Title", "Seed_Text" })
 
 	if not name or isMultiplierText(name) then
 		name = nil
@@ -1339,7 +1352,10 @@ local function buildPayload()
 		if clockNow >= PayloadCache.nextFruitParseAt then
 			PayloadCache.nextFruitParseAt = clockNow + FRUIT_PRICE_PARSE_INTERVAL
 			local fruitPriceStock = safeParse("fruitPriceStock", function() return parseFruitPriceStock(pg) end)
-			if fruitPriceStock then PayloadCache.fruitPriceStock = fruitPriceStock end
+			if fruitPriceStock then
+				PayloadCache.fruitPriceStock = fruitPriceStock
+				FruitPriceParseVersion += 1
+			end
 		end
 
 		local seedShop = PayloadCache.seedShop
@@ -1426,7 +1442,7 @@ local function buildOutboundPayload(payload)
 		local ok, encoded = pcall(function()
 			return HttpService:JSONEncode(payload)
 		end)
-		return ok, encoded, signatures, true
+		return ok, encoded, signatures, true, FruitPriceParseVersion
 	end
 
 	local patch = {
@@ -1441,7 +1457,8 @@ local function buildOutboundPayload(payload)
 		end)
 		if ok then
 			signatures[field] = sig
-			if sig ~= lastFieldSignatures[field] then
+			if sig ~= lastFieldSignatures[field]
+				or (field == "fruitPriceStock" and FruitPriceParseVersion ~= LastSentFruitPriceParseVersion) then
 				patch[field] = payload[field]
 			end
 		end
@@ -1449,7 +1466,7 @@ local function buildOutboundPayload(payload)
 	local ok, encoded = pcall(function()
 		return HttpService:JSONEncode(patch)
 	end)
-	return ok, encoded, signatures, false
+	return ok, encoded, signatures, false, FruitPriceParseVersion
 end
 
 safeConnectSignal(LocalPlayer.AncestryChanged, function(_, parent)
@@ -1487,7 +1504,7 @@ end)
 			local okLoop, loopErr = pcall(function()
 				local payload = buildPayload()
 				if payload then
-					local okEncode, encoded, signatures, isInitial = buildOutboundPayload(payload)
+					local okEncode, encoded, signatures, isInitial, fruitPriceVersionForSend = buildOutboundPayload(payload)
 					if not okEncode then
 						errl("encode failed: " .. tostring(encoded))
 						return
@@ -1498,6 +1515,7 @@ end)
 							sentInitialSnapshot = true
 							lastFullSnapshotAt = os.clock()
 						end
+						LastSentFruitPriceParseVersion = fruitPriceVersionForSend or LastSentFruitPriceParseVersion
 						for field, sig in pairs(signatures or {}) do
 							lastFieldSignatures[field] = sig
 						end
