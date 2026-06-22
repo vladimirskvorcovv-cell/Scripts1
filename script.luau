@@ -896,6 +896,60 @@ local FRUIT_PRICE_ORDER = {
 	"Venom Spitter", "Moon Bloom", "Dragon's Breath",
 }
 
+local function knownFruitNames()
+	local out = {}
+	local seen = {}
+	local seeds = ServerItems and ServerItems.seeds
+	if type(seeds) == "table" then
+		for key, meta in pairs(seeds) do
+			for _, name in ipairs({ key, meta.en, meta.ru }) do
+				if name then
+					local ck = catalogKey(name)
+					if ck ~= "" and not seen[ck] then
+						seen[ck] = true
+						out[#out + 1] = tostring(name)
+					end
+				end
+			end
+		end
+	end
+	for _, name in ipairs(FRUIT_PRICE_ORDER) do
+		local ck = catalogKey(name)
+		if ck ~= "" and not seen[ck] then
+			seen[ck] = true
+			out[#out + 1] = name
+		end
+	end
+	return out
+end
+
+local function inferFruitNameFromInstance(root)
+	local blobs = { root.Name }
+	local function addInstance(inst)
+		blobs[#blobs + 1] = inst.Name
+		local okAttrs, attrs = pcall(function() return inst:GetAttributes() end)
+		if okAttrs and type(attrs) == "table" then
+			for k, v in pairs(attrs) do
+				blobs[#blobs + 1] = tostring(k)
+				blobs[#blobs + 1] = tostring(v)
+			end
+		end
+	end
+	local okDesc, desc = pcall(function() return root:GetDescendants() end)
+	if okDesc then
+		for _, inst in ipairs(desc) do addInstance(inst) end
+	end
+	local haystack = catalogKey(table.concat(blobs, " "))
+	if haystack == "" then return nil end
+	for _, fruitName in ipairs(knownFruitNames()) do
+		local needle = catalogKey(fruitName)
+		if needle ~= "" and string.find(haystack, needle, 1, true) then
+			return fruitName
+		end
+	end
+	return nil
+end
+
 local function sortedChildren(parent)
 	local ok, children = pcall(function() return parent:GetChildren() end)
 	if not ok then return {} end
@@ -956,9 +1010,9 @@ local function parseFruitPriceItem(root, index)
 
 	if not name and not multiplier then return nil end
 	local mult = multiplierNumber(multiplier)
-	local fallbackName = FRUIT_PRICE_ORDER[index]
+	local inferredName = inferFruitNameFromInstance(root)
 	return {
-		item = name or (root.Name ~= "FruitCard" and root.Name ~= "Template" and root.Name or fallbackName or ("Fruit " .. tostring(index))),
+		item = name or inferredName or (root.Name ~= "FruitCard" and root.Name ~= "Template" and root.Name or ("Fruit " .. tostring(index))),
 		multiplier = multiplier,
 		multiplierNum = mult,
 		percent = mult and math.floor(mult * 10000 + 0.5) / 100 or nil,
