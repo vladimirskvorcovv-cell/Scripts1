@@ -867,6 +867,134 @@ local function parseCrateShop(pg)
 end
 
 
+local function chanceNumber(text)
+	local n = string.match(tostring(text or ""), "([%d%.]+)%s*%%")
+	return n and tonumber(n) or nil
+end
+
+local function isChanceText(text)
+	return chanceNumber(text) ~= nil
+end
+
+local function multiplierNumber(text)
+	local n = string.match(tostring(text or ""), "[xX]%s*([%d%.]+)")
+	return n and tonumber(n) or nil
+end
+
+local function isMultiplierText(text)
+	return multiplierNumber(text) ~= nil
+end
+
+local function parseOddsItem(root)
+	local texts = collectTexts(root)
+	local chance = fieldAny(root, { "Odds", "Chance", "Odds_Text", "Chance_Text" })
+		or pickShopText(texts, isChanceText)
+	local name = fieldAny(root, { "ItemName", "Item_Name", "NameLabel", "Name", "Title", "Seed_Text" })
+	local rarity = fieldAny(root, RARITY_FIELDS) or pickShopText(texts, isRarityText)
+
+	if not name or isChanceText(name) or isRarityText(name) then
+		name = nil
+		for _, entry in ipairs(texts) do
+			if not isChanceText(entry.text) and not isRarityText(entry.text)
+				and entry.text ~= "?" and #entry.text <= 64 then
+				name = entry.text
+				break
+			end
+		end
+	end
+
+	if not name and not chance then return nil end
+	return {
+		item = name or root.Name,
+		chance = chance,
+		chanceNum = chanceNumber(chance),
+		rarity = rarity,
+	}
+end
+
+local function parseCrateOdds(pg)
+	local odds = pg:FindFirstChild("Odds")
+	if not odds then return nil end
+	local frame = odds:FindFirstChild("Frame") or odds
+	local scroll = frame:FindFirstChild("ScrollingFrame", true)
+	if not scroll then return nil end
+
+	local items = {}
+	local ok, children = pcall(function() return scroll:GetChildren() end)
+	if not ok then return nil end
+	for _, child in ipairs(children) do
+		if not shouldSkipShopChild(child)
+			and child.Name ~= "Template"
+			and child.Name ~= "GrandTemplate"
+			and child.Name ~= "ItemTemplate" then
+			local item = parseOddsItem(child)
+			if item then table.insert(items, item) end
+		end
+	end
+	if #items == 0 then return nil end
+	return {
+		title = field(frame:FindFirstChild("Header"), "TextLabel") or "Item Odds",
+		items = items,
+	}
+end
+
+local function parseFruitPriceItem(root, index)
+	local texts = collectTexts(root)
+	local multiplier = fieldAny(root, { "Multiplier", "Multiplier_Text", "Percent", "Percent_Text" })
+		or pickShopText(texts, isMultiplierText)
+	local name = fieldAny(root, { "FruitName", "ItemName", "Item_Name", "NameLabel", "Name", "Title" })
+
+	if not name or isMultiplierText(name) then
+		name = nil
+		for _, entry in ipairs(texts) do
+			if not isMultiplierText(entry.text) and entry.text ~= "?" and #entry.text <= 64 then
+				name = entry.text
+				break
+			end
+		end
+	end
+
+	if not name and not multiplier then return nil end
+	local mult = multiplierNumber(multiplier)
+	return {
+		item = name or (root.Name ~= "FruitCard" and root.Name or ("Fruit " .. tostring(index))),
+		multiplier = multiplier,
+		multiplierNum = mult,
+		percent = mult and math.floor(mult * 10000 + 0.5) / 100 or nil,
+		changePercent = mult and math.floor((mult - 1) * 10000 + 0.5) / 100 or nil,
+	}
+end
+
+local function parseFruitPriceStock(pg)
+	local stock = pg:FindFirstChild("FruitStockPrice")
+	if not stock then return nil end
+	local frame = stock:FindFirstChild("Frame")
+	if not frame then return nil end
+	local restock = timerOf(frame, "Header")
+	local scroll = frame:FindFirstChild("ScrollingFrame", true)
+	local items = {}
+
+	if scroll then
+		local ok, children = pcall(function() return scroll:GetChildren() end)
+		if ok then
+			for _, child in ipairs(children) do
+				if not shouldSkipShopChild(child) and child.Name ~= "Template" then
+					local item = parseFruitPriceItem(child, #items + 1)
+					if item then table.insert(items, item) end
+				end
+			end
+		end
+	end
+
+	if #items == 0 and not restock then return nil end
+	return {
+		restock = restock,
+		restockSeconds = parseDuration(restock),
+		items = items,
+	}
+end
+
+
 local function formatDuration(secs)
 	if type(secs) ~= "number" or secs < 0 then return nil end
 	secs = math.floor(secs)
@@ -1140,13 +1268,23 @@ local function buildPayload()
 	if not pg then
 		return nil
 	end
+	local function safeParse(label, fn)
+		local ok, result = pcall(fn)
+		if not ok then
+			errl(label .. " parse error: " .. tostring(result))
+			return nil
+		end
+		return result
+	end
 	local payload
-	local ok = pcall(function()
-		local weather = parseWeather(pg)
-		local seedShop = parseSeedShop(pg)
-		local gearShop = parseGearShop(pg)
-		local crateShop = parseCrateShop(pg)
-		local moons = parseMoons()
+	local ok, err = pcall(function()
+		local weather = safeParse("weather", function() return parseWeather(pg) end)
+		local seedShop = safeParse("seedShop", function() return parseSeedShop(pg) end)
+		local gearShop = safeParse("gearShop", function() return parseGearShop(pg) end)
+		local crateShop = safeParse("crateShop", function() return parseCrateShop(pg) end)
+		local crateOdds = safeParse("crateOdds", function() return parseCrateOdds(pg) end)
+		local fruitPriceStock = safeParse("fruitPriceStock", function() return parseFruitPriceStock(pg) end)
+		local moons = safeParse("moons", parseMoons)
 
 
 		local weatherActive = 0
@@ -1184,7 +1322,9 @@ local function buildPayload()
 			seedShop = seedShop,
 			gearShop = gearShop,
 			crateShop = crateShop,
-			gardenLevel = parseGardenLevel(pg),
+			crateOdds = crateOdds,
+			fruitPriceStock = fruitPriceStock,
+			gardenLevel = safeParse("gardenLevel", function() return parseGardenLevel(pg) end),
 			isNight = isNight,
 			dayPhase = isNight and "Night" or "Day",
 			counts = {
@@ -1195,10 +1335,13 @@ local function buildPayload()
 				seeds = seedShop and #seedShop.items or 0,
 				gear = gearShop and #gearShop.items or 0,
 				crates = crateShop and #crateShop.items or 0,
+				crateOdds = crateOdds and #crateOdds.items or 0,
+				fruitPrices = fruitPriceStock and #fruitPriceStock.items or 0,
 			},
 		}
 	end)
 	if not ok then
+		errl("buildPayload error: " .. tostring(err))
 		return nil
 	end
 	return payload
@@ -1214,9 +1357,9 @@ safeConnectSignal(LocalPlayer.AncestryChanged, function(_, parent)
 	end
 end)
 
-task.spawn(function()
-	task.wait(START_DELAY)
-	info("GardenParser started")
+	task.spawn(function()
+		task.wait(START_DELAY)
+		warnl("GardenParser started")
 
 
 	pcall(armTeleportRestore)
