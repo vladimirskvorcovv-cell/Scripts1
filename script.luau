@@ -867,15 +867,6 @@ local function parseCrateShop(pg)
 end
 
 
-local function chanceNumber(text)
-	local n = string.match(tostring(text or ""), "([%d%.]+)%s*%%")
-	return n and tonumber(n) or nil
-end
-
-local function isChanceText(text)
-	return chanceNumber(text) ~= nil
-end
-
 local function multiplierNumber(text)
 	local n = string.match(tostring(text or ""), "[xX]%s*([%d%.]+)")
 	return n and tonumber(n) or nil
@@ -885,64 +876,61 @@ local function isMultiplierText(text)
 	return multiplierNumber(text) ~= nil
 end
 
-local function parseOddsItem(root)
-	local texts = collectTexts(root)
-	local chance = fieldAny(root, { "Odds", "Chance", "Odds_Text", "Chance_Text" })
-		or pickShopText(texts, isChanceText)
-	local name = fieldAny(root, { "ItemName", "Item_Name", "NameLabel", "Name", "Title", "Seed_Text" })
-	local rarity = fieldAny(root, RARITY_FIELDS) or pickShopText(texts, isRarityText)
+local FRUIT_PRICE_ORDER = {
+	"Carrot", "Strawberry", "Blueberry", "Tulip", "Tomato", "Apple",
+	"Bamboo", "Corn", "Cactus", "Pineapple", "Mushroom", "Green Bean",
+	"Banana", "Grape", "Coconut", "Mango", "Dragon Fruit", "Acorn",
+	"Cherry", "Sunflower", "Venus Fly Trap", "Pomegranate", "Poison Apple",
+	"Venom Spitter", "Moon Bloom", "Dragon's Breath",
+}
 
-	if not name or isChanceText(name) or isRarityText(name) then
-		name = nil
-		for _, entry in ipairs(texts) do
-			if not isChanceText(entry.text) and not isRarityText(entry.text)
-				and entry.text ~= "?" and #entry.text <= 64 then
-				name = entry.text
-				break
-			end
-		end
-	end
-
-	if not name and not chance then return nil end
-	return {
-		item = name or root.Name,
-		chance = chance,
-		chanceNum = chanceNumber(chance),
-		rarity = rarity,
-	}
+local function sortedChildren(parent)
+	local ok, children = pcall(function() return parent:GetChildren() end)
+	if not ok then return {} end
+	local order = {}
+	for i, child in ipairs(children) do order[child] = i end
+	table.sort(children, function(a, b)
+		local ao = 0
+		local bo = 0
+		pcall(function() ao = a.LayoutOrder or 0 end)
+		pcall(function() bo = b.LayoutOrder or 0 end)
+		if ao ~= bo then return ao < bo end
+		local an = tostring(a.Name)
+		local bn = tostring(b.Name)
+		if an ~= bn then return an < bn end
+		return order[a] < order[b]
+	end)
+	return children
 end
 
-local function parseCrateOdds(pg)
-	local odds = pg:FindFirstChild("Odds")
-	if not odds then return nil end
-	local frame = odds:FindFirstChild("Frame") or odds
-	local scroll = frame:FindFirstChild("ScrollingFrame", true)
-	if not scroll then return nil end
-
-	local items = {}
-	local ok, children = pcall(function() return scroll:GetChildren() end)
-	if not ok then return nil end
-	for _, child in ipairs(children) do
-		if not shouldSkipShopChild(child)
-			and child.Name ~= "Template"
-			and child.Name ~= "GrandTemplate"
-			and child.Name ~= "ItemTemplate" then
-			local item = parseOddsItem(child)
-			if item then table.insert(items, item) end
+local function cloneArray(list)
+	local out = {}
+	for _, item in ipairs(list or {}) do
+		if type(item) == "table" then
+			local copy = {}
+			for k, v in pairs(item) do copy[k] = v end
+			out[#out + 1] = copy
 		end
 	end
-	if #items == 0 then return nil end
-	return {
-		title = field(frame:FindFirstChild("Header"), "TextLabel") or "Item Odds",
-		items = items,
-	}
+	return out
+end
+
+local function attachCrateOdds(crateShop)
+	if not crateShop or not crateShop.items then return crateShop end
+	for _, crate in ipairs(crateShop.items) do
+		local meta = catalogEntry("crates", crate.item)
+		if meta and type(meta.odds) == "table" then
+			crate.odds = cloneArray(meta.odds)
+		end
+	end
+	return crateShop
 end
 
 local function parseFruitPriceItem(root, index)
 	local texts = collectTexts(root)
 	local multiplier = fieldAny(root, { "Multiplier", "Multiplier_Text", "Percent", "Percent_Text" })
 		or pickShopText(texts, isMultiplierText)
-	local name = fieldAny(root, { "FruitName", "ItemName", "Item_Name", "NameLabel", "Name", "Title" })
+	local name = fieldAny(root, { "FruitName", "ItemName", "Item_Name", "NameLabel", "Name", "Title", "Seed_Text" })
 
 	if not name or isMultiplierText(name) then
 		name = nil
@@ -956,8 +944,9 @@ local function parseFruitPriceItem(root, index)
 
 	if not name and not multiplier then return nil end
 	local mult = multiplierNumber(multiplier)
+	local fallbackName = FRUIT_PRICE_ORDER[index]
 	return {
-		item = name or (root.Name ~= "FruitCard" and root.Name or ("Fruit " .. tostring(index))),
+		item = name or (root.Name ~= "FruitCard" and root.Name ~= "Template" and root.Name or fallbackName or ("Fruit " .. tostring(index))),
 		multiplier = multiplier,
 		multiplierNum = mult,
 		percent = mult and math.floor(mult * 10000 + 0.5) / 100 or nil,
@@ -975,13 +964,10 @@ local function parseFruitPriceStock(pg)
 	local items = {}
 
 	if scroll then
-		local ok, children = pcall(function() return scroll:GetChildren() end)
-		if ok then
-			for _, child in ipairs(children) do
-				if not shouldSkipShopChild(child) and child.Name ~= "Template" then
-					local item = parseFruitPriceItem(child, #items + 1)
-					if item then table.insert(items, item) end
-				end
+		for _, child in ipairs(sortedChildren(scroll)) do
+			if not shouldSkipShopChild(child) and child.Name ~= "Template" then
+				local item = parseFruitPriceItem(child, #items + 1)
+				if item then table.insert(items, item) end
 			end
 		end
 	end
@@ -1278,11 +1264,12 @@ local function buildPayload()
 	end
 	local payload
 	local ok, err = pcall(function()
+		local now = DateTime.now()
 		local weather = safeParse("weather", function() return parseWeather(pg) end)
 		local seedShop = safeParse("seedShop", function() return parseSeedShop(pg) end)
 		local gearShop = safeParse("gearShop", function() return parseGearShop(pg) end)
 		local crateShop = safeParse("crateShop", function() return parseCrateShop(pg) end)
-		local crateOdds = safeParse("crateOdds", function() return parseCrateOdds(pg) end)
+		crateShop = attachCrateOdds(crateShop)
 		local fruitPriceStock = safeParse("fruitPriceStock", function() return parseFruitPriceStock(pg) end)
 		local moons = safeParse("moons", parseMoons)
 
@@ -1314,7 +1301,8 @@ local function buildPayload()
 
 		payload = {
 			type = "data",
-			ts = os.time(),
+			ts = now.UnixTimestamp,
+			tsMs = now.UnixTimestampMillis,
 			player = LocalPlayer.Name,
 			userId = LocalPlayer.UserId,
 			weather = weather,
@@ -1322,7 +1310,6 @@ local function buildPayload()
 			seedShop = seedShop,
 			gearShop = gearShop,
 			crateShop = crateShop,
-			crateOdds = crateOdds,
 			fruitPriceStock = fruitPriceStock,
 			gardenLevel = safeParse("gardenLevel", function() return parseGardenLevel(pg) end),
 			isNight = isNight,
@@ -1335,7 +1322,6 @@ local function buildPayload()
 				seeds = seedShop and #seedShop.items or 0,
 				gear = gearShop and #gearShop.items or 0,
 				crates = crateShop and #crateShop.items or 0,
-				crateOdds = crateOdds and #crateOdds.items or 0,
 				fruitPrices = fruitPriceStock and #fruitPriceStock.items or 0,
 			},
 		}
@@ -1348,7 +1334,6 @@ local function buildPayload()
 end
 
 local Running = true
-local lastEncodedPayload = nil
 
 safeConnectSignal(LocalPlayer.AncestryChanged, function(_, parent)
 	if parent == nil then
@@ -1392,8 +1377,6 @@ end)
 						errl("encode failed: " .. tostring(encoded))
 						return
 					end
-					if encoded == lastEncodedPayload then return end
-					lastEncodedPayload = encoded
 					LatestParse = payload
 					if Net.send(nil, encoded) then
 						Stats.sentPackets += 1
@@ -1406,7 +1389,8 @@ end)
 			if not okLoop then
 				errl("loop error: " .. tostring(loopErr))
 			end
-			task.wait(math.max(0.03, PARSE_INTERVAL - (os.clock() - tickStarted)))
+			local waitFor = PARSE_INTERVAL - (os.clock() - tickStarted)
+			if waitFor > 0 then task.wait(waitFor) end
 		else
 			task.wait(PARSE_INTERVAL)
 		end
