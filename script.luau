@@ -746,14 +746,20 @@ local function parseShopItem(root, bucketName)
 		or pickShopText(texts, isRarityText)
 
 	if not name and not stock then return nil end
+	local meta = catalogEntry(bucketName, name)
+	local isPermanent = meta and meta.permanent == true
 	local n = stockCount(stock)
+	if isPermanent then
+		n = n > 0 and n or 1
+	end
 	return {
 		item = name or root.Name,
 		stock = stock,
 		cost = cost,
 		rarity = rarity,
 		stockNum = n,
-		inStock = n > 0,
+		inStock = isPermanent or n > 0,
+		permanent = isPermanent or nil,
 	}
 end
 
