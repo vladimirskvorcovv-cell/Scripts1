@@ -3,6 +3,9 @@
 local SERVER_IP = "89.125.169.199"
 local SERVER_PORT = 443
 local PARSE_INTERVAL = 0.1
+local SHOP_PARSE_INTERVAL = 1
+local FRUIT_PRICE_PARSE_INTERVAL = 1
+local HEARTBEAT_SEND_INTERVAL = 1
 local START_DELAY = 1
 local RECONNECT_DELAY = 5
 
@@ -38,6 +41,15 @@ local Stats = {
 local LatestParse = nil
 local ServerItems = nil
 local ServerItemsVersion = 0
+
+local PayloadCache = {
+	seedShop = nil,
+	gearShop = nil,
+	crateShop = nil,
+	fruitPriceStock = nil,
+	nextShopParseAt = 0,
+	nextFruitParseAt = 0,
+}
 
 
 local CONFIG_FILE = "GardenParser_config.json"
@@ -1265,13 +1277,30 @@ local function buildPayload()
 	local payload
 	local ok, err = pcall(function()
 		local now = DateTime.now()
+		local clockNow = os.clock()
 		local weather = safeParse("weather", function() return parseWeather(pg) end)
-		local seedShop = safeParse("seedShop", function() return parseSeedShop(pg) end)
-		local gearShop = safeParse("gearShop", function() return parseGearShop(pg) end)
-		local crateShop = safeParse("crateShop", function() return parseCrateShop(pg) end)
-		crateShop = attachCrateOdds(crateShop)
-		local fruitPriceStock = safeParse("fruitPriceStock", function() return parseFruitPriceStock(pg) end)
 		local moons = safeParse("moons", parseMoons)
+
+		if clockNow >= PayloadCache.nextShopParseAt then
+			PayloadCache.nextShopParseAt = clockNow + SHOP_PARSE_INTERVAL
+			local seedShop = safeParse("seedShop", function() return parseSeedShop(pg) end)
+			local gearShop = safeParse("gearShop", function() return parseGearShop(pg) end)
+			local crateShop = safeParse("crateShop", function() return parseCrateShop(pg) end)
+			if seedShop then PayloadCache.seedShop = seedShop end
+			if gearShop then PayloadCache.gearShop = gearShop end
+			if crateShop then PayloadCache.crateShop = attachCrateOdds(crateShop) end
+		end
+
+		if clockNow >= PayloadCache.nextFruitParseAt then
+			PayloadCache.nextFruitParseAt = clockNow + FRUIT_PRICE_PARSE_INTERVAL
+			local fruitPriceStock = safeParse("fruitPriceStock", function() return parseFruitPriceStock(pg) end)
+			if fruitPriceStock then PayloadCache.fruitPriceStock = fruitPriceStock end
+		end
+
+		local seedShop = PayloadCache.seedShop
+		local gearShop = PayloadCache.gearShop
+		local crateShop = PayloadCache.crateShop
+		local fruitPriceStock = PayloadCache.fruitPriceStock
 
 
 		local weatherActive = 0
@@ -1334,6 +1363,8 @@ local function buildPayload()
 end
 
 local Running = true
+local lastPayloadSignature = nil
+local lastPayloadSentAt = 0
 
 safeConnectSignal(LocalPlayer.AncestryChanged, function(_, parent)
 	if parent == nil then
@@ -1370,6 +1401,26 @@ end)
 			local okLoop, loopErr = pcall(function()
 				local payload = buildPayload()
 				if payload then
+					local ts = payload.ts
+					local tsMs = payload.tsMs
+					payload.ts = nil
+					payload.tsMs = nil
+					local okSig, signature = pcall(function()
+						return HttpService:JSONEncode(payload)
+					end)
+					payload.ts = ts
+					payload.tsMs = tsMs
+					if not okSig then
+						errl("signature encode failed: " .. tostring(signature))
+						return
+					end
+
+					local nowSend = os.clock()
+					if signature == lastPayloadSignature and (nowSend - lastPayloadSentAt) < HEARTBEAT_SEND_INTERVAL then
+						LatestParse = payload
+						return
+					end
+
 					local okEncode, encoded = pcall(function()
 						return HttpService:JSONEncode(payload)
 					end)
@@ -1379,6 +1430,8 @@ end)
 					end
 					LatestParse = payload
 					if Net.send(nil, encoded) then
+						lastPayloadSignature = signature
+						lastPayloadSentAt = nowSend
 						Stats.sentPackets += 1
 						Stats.itemsFound = (payload.seedShop and #payload.seedShop.items or 0) + (payload.gearShop and #payload.gearShop.items or 0)
 					end
