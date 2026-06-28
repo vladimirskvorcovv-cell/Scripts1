@@ -5,6 +5,7 @@ local SERVER_PORT = 443
 local PARSE_INTERVAL = 0.1
 local SHOP_PARSE_INTERVAL = 1
 local FRUIT_PRICE_PARSE_INTERVAL = 1
+local AUCTION_PARSE_INTERVAL = 1
 local FULL_SNAPSHOT_INTERVAL = 5
 local START_DELAY = 1
 local RECONNECT_DELAY = 5
@@ -47,12 +48,16 @@ local PayloadCache = {
 	gearShop = nil,
 	crateShop = nil,
 	fruitPriceStock = nil,
+	auctionStock = nil,
 	nextShopParseAt = 0,
 	nextFruitParseAt = 0,
+	nextAuctionParseAt = 0,
 }
 
 local FruitPriceParseVersion = 0
 local LastSentFruitPriceParseVersion = 0
+local AuctionParseVersion = 0
+local LastSentAuctionParseVersion = 0
 
 
 local CONFIG_FILE = "GardenParser_config.json"
@@ -1060,6 +1065,85 @@ local function parseFruitPriceStock(pg)
 end
 
 
+local function auctionCostFrom(main, texts)
+	local buyButton = main and main:FindFirstChild("BuyButton", true)
+	local cost = buyButton and fieldAny(buyButton, { "TextLabel", "Price", "Cost", "Text" }) or nil
+	if not cost or string.lower(tostring(cost)) == "buy" then
+		cost = fieldAny(main, COST_FIELDS) or pickShopText(texts, isCostText)
+	end
+	return cost
+end
+
+local function parseAuctionItem(root, index)
+	local main = root:FindFirstChild("Main_Frame", true)
+		or root:FindFirstChild("MainFrame", true)
+		or root:FindFirstChild("Main", true)
+		or root
+	local texts = collectTexts(main)
+	local name = fieldAny(main, { "ItemName", "Item_Name", "Item_Text", "NameLabel", "Name", "Title", "Seed_Text" })
+		or pickItemName(main, texts, "seeds")
+	local quantity = nested(main, "ImageDisplay", "Amount")
+		or fieldAny(main, { "Amount", "Quantity", "Count" })
+	local stock = fieldAny(main, { "Stock_Text", "StockText", "Stock" })
+	local cost = auctionCostFrom(main, texts)
+	local rarity = nested(main, "Rarity", "Rarity_Text")
+		or fieldAny(main, RARITY_FIELDS)
+		or pickShopText(texts, isRarityText)
+	local refresh = main:FindFirstChild("RefreshIn")
+	local timeLeft = refresh and field(refresh, "Timer") or nil
+	if not timeLeft then
+		timeLeft = fieldAny(main, { "Timer" })
+	end
+
+	if not name and not stock and not cost and not timeLeft then return nil end
+	local lowStock = string.lower(tostring(stock or ""))
+	local stockNum = stockCount(stock)
+	local timeSeconds = parseDuration(timeLeft)
+	local soldOut = string.find(lowStock, "sold%s*out") ~= nil
+		or string.find(lowStock, "out%s*of%s*stock") ~= nil
+		or string.find(lowStock, "no%s*stock") ~= nil
+	local inStock = (not soldOut) and stockNum > 0
+
+	return {
+		item = name or root.Name or ("Auction " .. tostring(index)),
+		quantity = quantity,
+		quantityNum = stockCount(quantity),
+		stock = stock,
+		stockNum = stockNum,
+		cost = cost,
+		rarity = rarity,
+		timeLeft = timeLeft,
+		timeSeconds = timeSeconds,
+		soldOut = soldOut,
+		inStock = inStock,
+	}
+end
+
+local function parseAuctionStock(pg)
+	local auction = pg:FindFirstChild("Auction")
+	if not auction then return nil end
+	local frame = auction:FindFirstChild("Frame")
+	if not frame then return nil end
+	local restock = timerOf(frame, "Header")
+	local scroll = frame:FindFirstChild("ScrollingFrame", true)
+	local items = {}
+
+	if scroll then
+		for _, child in ipairs(sortedChildren(scroll)) do
+			if not shouldSkipShopChild(child) and child.Name ~= "Template" then
+				local item = parseAuctionItem(child, #items + 1)
+				if item then table.insert(items, item) end
+			end
+		end
+	end
+
+	if #items == 0 and not restock then return nil end
+	return {
+		restock = restock,
+		restockSeconds = parseDuration(restock),
+		items = items,
+	}
+end
 local function formatDuration(secs)
 	if type(secs) ~= "number" or secs < 0 then return nil end
 	secs = math.floor(secs)
@@ -1358,10 +1442,20 @@ local function buildPayload()
 			end
 		end
 
+		if clockNow >= PayloadCache.nextAuctionParseAt then
+			PayloadCache.nextAuctionParseAt = clockNow + AUCTION_PARSE_INTERVAL
+			local auctionStock = safeParse("auctionStock", function() return parseAuctionStock(pg) end)
+			if auctionStock then
+				PayloadCache.auctionStock = auctionStock
+				AuctionParseVersion += 1
+			end
+		end
+
 		local seedShop = PayloadCache.seedShop
 		local gearShop = PayloadCache.gearShop
 		local crateShop = PayloadCache.crateShop
 		local fruitPriceStock = PayloadCache.fruitPriceStock
+		local auctionStock = PayloadCache.auctionStock
 
 
 		local weatherActive = 0
@@ -1399,6 +1493,7 @@ local function buildPayload()
 			gearShop = gearShop,
 			crateShop = crateShop,
 			fruitPriceStock = fruitPriceStock,
+			auctionStock = auctionStock,
 			isNight = isNight,
 			dayPhase = isNight and "Night" or "Day",
 			counts = {
@@ -1410,6 +1505,7 @@ local function buildPayload()
 				gear = gearShop and #gearShop.items or 0,
 				crates = crateShop and #crateShop.items or 0,
 				fruitPrices = fruitPriceStock and #fruitPriceStock.items or 0,
+				auctions = auctionStock and #auctionStock.items or 0,
 			},
 		}
 	end)
@@ -1426,7 +1522,7 @@ local lastFullSnapshotAt = 0
 local lastFieldSignatures = {}
 local PATCH_FIELDS = {
 	"weather", "moons", "seedShop", "gearShop", "crateShop",
-	"fruitPriceStock", "isNight", "dayPhase", "counts",
+	"fruitPriceStock", "auctionStock", "isNight", "dayPhase", "counts",
 }
 
 local function buildOutboundPayload(payload)
@@ -1442,7 +1538,7 @@ local function buildOutboundPayload(payload)
 		local ok, encoded = pcall(function()
 			return HttpService:JSONEncode(payload)
 		end)
-		return ok, encoded, signatures, true, FruitPriceParseVersion
+		return ok, encoded, signatures, true, FruitPriceParseVersion, AuctionParseVersion
 	end
 
 	local patch = {
@@ -1458,7 +1554,8 @@ local function buildOutboundPayload(payload)
 		if ok then
 			signatures[field] = sig
 			if sig ~= lastFieldSignatures[field]
-				or (field == "fruitPriceStock" and FruitPriceParseVersion ~= LastSentFruitPriceParseVersion) then
+				or (field == "fruitPriceStock" and FruitPriceParseVersion ~= LastSentFruitPriceParseVersion)
+				or (field == "auctionStock" and AuctionParseVersion ~= LastSentAuctionParseVersion) then
 				patch[field] = payload[field]
 			end
 		end
@@ -1466,7 +1563,7 @@ local function buildOutboundPayload(payload)
 	local ok, encoded = pcall(function()
 		return HttpService:JSONEncode(patch)
 	end)
-	return ok, encoded, signatures, false, FruitPriceParseVersion
+	return ok, encoded, signatures, false, FruitPriceParseVersion, AuctionParseVersion
 end
 
 safeConnectSignal(LocalPlayer.AncestryChanged, function(_, parent)
@@ -1504,7 +1601,7 @@ end)
 			local okLoop, loopErr = pcall(function()
 				local payload = buildPayload()
 				if payload then
-					local okEncode, encoded, signatures, isInitial, fruitPriceVersionForSend = buildOutboundPayload(payload)
+					local okEncode, encoded, signatures, isInitial, fruitPriceVersionForSend, auctionVersionForSend = buildOutboundPayload(payload)
 					if not okEncode then
 						errl("encode failed: " .. tostring(encoded))
 						return
@@ -1516,6 +1613,7 @@ end)
 							lastFullSnapshotAt = os.clock()
 						end
 						LastSentFruitPriceParseVersion = fruitPriceVersionForSend or LastSentFruitPriceParseVersion
+						LastSentAuctionParseVersion = auctionVersionForSend or LastSentAuctionParseVersion
 						for field, sig in pairs(signatures or {}) do
 							lastFieldSignatures[field] = sig
 						end
