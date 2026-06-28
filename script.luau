@@ -1065,6 +1065,30 @@ local function parseFruitPriceStock(pg)
 end
 
 
+local function isVisibleChain(inst, stopAt)
+	local node = inst
+	while node and node ~= stopAt do
+		local okVis, vis = pcall(function() return node.Visible end)
+		if okVis and vis == false then return false end
+		local okEn, en = pcall(function() return node.Enabled end)
+		if okEn and en == false then return false end
+		node = node.Parent
+	end
+	return true
+end
+
+local function auctionLotBatchId(inst)
+	local id = string.match(tostring(inst and inst.Name or ""), "^Lot_auction:(%d+):%d+$")
+	return id and tonumber(id) or nil
+end
+
+local function isAuctionLotChild(inst)
+	if not inst then return false end
+	if auctionLotBatchId(inst) ~= nil then return true end
+	local name = tostring(inst.Name or "")
+	return string.find(name, "Lot_auction", 1, true) == 1
+end
+
 local function auctionCostFrom(main, texts)
 	local buyButton = main and main:FindFirstChild("BuyButton", true)
 	local cost = buyButton and fieldAny(buyButton, { "TextLabel", "Price", "Cost", "Text" }) or nil
@@ -1081,7 +1105,6 @@ local function parseAuctionItem(root, index)
 		or root
 	local texts = collectTexts(main)
 	local name = fieldAny(main, { "ItemName", "Item_Name", "Item_Text", "NameLabel", "Name", "Title", "Seed_Text" })
-		or pickItemName(main, texts, "seeds")
 	local quantity = nested(main, "ImageDisplay", "Amount")
 		or fieldAny(main, { "Amount", "Quantity", "Count" })
 	local stock = fieldAny(main, { "Stock_Text", "StockText", "Stock" })
@@ -1129,8 +1152,36 @@ local function parseAuctionStock(pg)
 	local items = {}
 
 	if scroll then
-		for _, child in ipairs(sortedChildren(scroll)) do
-			if not shouldSkipShopChild(child) and child.Name ~= "Template" then
+		local rawChildren = sortedChildren(scroll)
+		local lotChildren = {}
+		local newestBatch = nil
+		for _, child in ipairs(rawChildren) do
+			if not shouldSkipShopChild(child) and child.Name ~= "Template" and isAuctionLotChild(child) then
+				local batch = auctionLotBatchId(child)
+				if batch and (not newestBatch or batch > newestBatch) then newestBatch = batch end
+				lotChildren[#lotChildren + 1] = child
+			end
+		end
+		if #lotChildren == 0 then
+			for _, child in ipairs(rawChildren) do
+				if not shouldSkipShopChild(child) and child.Name ~= "Template" then
+					lotChildren[#lotChildren + 1] = child
+				end
+			end
+		end
+
+		local visibleChildren = {}
+		for _, child in ipairs(lotChildren) do
+			local batch = auctionLotBatchId(child)
+			if (not newestBatch or batch == newestBatch) and isVisibleChain(child, scroll) then
+				visibleChildren[#visibleChildren + 1] = child
+			end
+		end
+		local children = #visibleChildren > 0 and visibleChildren or lotChildren
+
+		for _, child in ipairs(children) do
+			local batch = auctionLotBatchId(child)
+			if not newestBatch or batch == newestBatch then
 				local item = parseAuctionItem(child, #items + 1)
 				if item then table.insert(items, item) end
 			end
