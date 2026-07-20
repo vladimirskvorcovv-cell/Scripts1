@@ -891,22 +891,28 @@ content.Position = UDim2.fromOffset(10, 44)
 content.BackgroundTransparency = 1
 content.Parent = frame
 
-local tabBar = Instance.new("Frame")
+local tabBar = Instance.new("ScrollingFrame")
 tabBar.Name = "Tabs"
 tabBar.Size = UDim2.new(1, 0, 0, 34)
 tabBar.BackgroundTransparency = 1
+tabBar.BorderSizePixel = 0
+tabBar.Active = true
+tabBar.ScrollingDirection = Enum.ScrollingDirection.X
+tabBar.ScrollBarThickness = 0
+tabBar.CanvasSize = UDim2.fromOffset(368, 0)
+tabBar.CanvasPosition = Vector2.zero
 tabBar.Parent = content
 
 local function createTab(name, text, index)
 	local button = Instance.new("TextButton")
 	button.Name = name
-	button.Size = UDim2.new(0.25, -3, 0, 30)
-	button.Position = UDim2.new(index * 0.25, index, 0, 2)
+	button.Size = UDim2.fromOffset(86, 30)
+	button.Position = UDim2.fromOffset(index * 94, 2)
 	button.BackgroundColor3 = Theme.Button
 	button.BorderSizePixel = 0
 	button.Text = text
 	button.Font = Enum.Font.GothamBold
-	button.TextSize = isTouchOnly and 13 or 12
+	button.TextSize = 14
 	button.TextColor3 = Theme.Text
 	button.AutoButtonColor = false
 	button.Parent = tabBar
@@ -987,6 +993,22 @@ track(teleportTab.MouseButton1Click:Connect(function()
 end))
 track(settingsTab.MouseButton1Click:Connect(function()
 	selectTab("Settings")
+end))
+track(UserInputService.InputChanged:Connect(function(input)
+	if input.UserInputType ~= Enum.UserInputType.MouseWheel then
+		return
+	end
+
+	local mousePosition = UserInputService:GetMouseLocation()
+	local position = tabBar.AbsolutePosition
+	local size = tabBar.AbsoluteSize
+	if mousePosition.X < position.X or mousePosition.X > position.X + size.X or mousePosition.Y < position.Y or mousePosition.Y > position.Y + size.Y then
+		return
+	end
+
+	local maxScroll = math.max(0, tabBar.CanvasSize.X.Offset - size.X)
+	local nextX = math.clamp(tabBar.CanvasPosition.X - input.Position.Z * 52, 0, maxScroll)
+	tabBar.CanvasPosition = Vector2.new(nextX, 0)
 end))
 selectTab("Main")
 
@@ -2725,3 +2747,4 @@ track(screenGui.Destroying:Connect(function()
 	saveSettingsNow()
 	table.clear(uiConnections)
 end))
+
