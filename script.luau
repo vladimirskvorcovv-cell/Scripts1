@@ -1187,6 +1187,19 @@ local function isESPVisible(character)
 		return true
 	end
 
+	local ignoreList = { character }
+	local localCharacter = LocalPlayer.Character
+	if localCharacter then
+		table.insert(ignoreList, localCharacter)
+	end
+
+	local obscuredOk, obstructingParts = pcall(function()
+		return camera:GetPartsObscuringTarget({ targetPart.Position }, ignoreList)
+	end)
+	if obscuredOk then
+		return #obstructingParts == 0
+	end
+
 	local direction = targetPart.Position - camera.CFrame.Position
 	if direction.Magnitude < 0.001 then
 		return true
@@ -1194,7 +1207,7 @@ local function isESPVisible(character)
 
 	local params = RaycastParams.new()
 	params.FilterType = Enum.RaycastFilterType.Blacklist
-	params.FilterDescendantsInstances = { LocalPlayer.Character, character }
+	params.FilterDescendantsInstances = ignoreList
 	return Workspace:Raycast(camera.CFrame.Position, direction, params) == nil
 end
 
