@@ -1097,6 +1097,7 @@ local ESP = {
 	Enabled = false,
 	_highlights = {},
 	_baseColors = {},
+	_visibility = {},
 	_playerConnections = {},
 	_humanoidConnections = {},
 	_playerAdded = nil,
@@ -1237,13 +1238,6 @@ local function isESPVisible(character)
 		table.insert(ignoreList, localCharacter)
 	end
 
-	local obscuredOk, obstructingParts = pcall(function()
-		return camera:GetPartsObscuringTarget({ targetPart.Position }, ignoreList)
-	end)
-	if obscuredOk then
-		return #obstructingParts == 0
-	end
-
 	local direction = targetPart.Position - camera.CFrame.Position
 	if direction.Magnitude < 0.001 then
 		return true
@@ -1255,7 +1249,7 @@ local function isESPVisible(character)
 	return Workspace:Raycast(camera.CFrame.Position, direction, params) == nil
 end
 
-local function updateESPColor(player, refreshBaseColor)
+local function updateESPColor(player, refreshBaseColor, refreshVisibility)
 	local highlight = ESP._highlights[player]
 	if not highlight then
 		return
@@ -1274,7 +1268,16 @@ local function updateESPColor(player, refreshBaseColor)
 
 	local fillColor = baseColors.fillColor
 	local outlineColor = baseColors.outlineColor
-	if not isESPVisible(player.Character) then
+	local isVisible = ESP._visibility[player]
+	if refreshVisibility then
+		isVisible = isESPVisible(player.Character)
+		ESP._visibility[player] = isVisible
+	elseif isVisible == nil then
+		isVisible = true
+		ESP._visibility[player] = true
+	end
+
+	if not isVisible then
 		if baseColors.teamColor == "red" then
 			fillColor = espRedOccludedFillColor
 			outlineColor = espRedOccludedOutlineColor
@@ -1329,6 +1332,7 @@ local function removeEspHighlight(player)
 		highlight:Destroy()
 		ESP._highlights[player] = nil
 	ESP._baseColors[player] = nil
+	ESP._visibility[player] = nil
 	end
 end
 
@@ -1416,11 +1420,23 @@ function ESP.start()
 	ESP._colorLoop += 1
 	local colorLoop = ESP._colorLoop
 	task.spawn(function()
+		local nextPlayerIndex = 1
 		while ESP.Enabled and ESP._colorLoop == colorLoop do
-			for player in pairs(ESP._highlights) do
-				updateESPColor(player)
+			local activePlayers = {}
+			for player, highlight in pairs(ESP._highlights) do
+				if highlight and highlight.Enabled and player.Character then
+					table.insert(activePlayers, player)
+				end
 			end
-			task.wait(1.5)
+
+			if #activePlayers > 0 then
+				if nextPlayerIndex > #activePlayers then
+					nextPlayerIndex = 1
+				end
+				updateESPColor(activePlayers[nextPlayerIndex], false, true)
+				nextPlayerIndex += 1
+			end
+			task.wait(0.1)
 		end
 	end)
 
@@ -1445,6 +1461,7 @@ function ESP.stop()
 		removeEspHighlight(player)
 	end
 	table.clear(ESP._baseColors)
+	table.clear(ESP._visibility)
 
 	return true
 end
