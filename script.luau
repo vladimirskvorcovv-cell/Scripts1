@@ -642,11 +642,15 @@ local function mergeSettings(saved)
 	if type(saved.Collapsed) == "boolean" then
 		sessionState.Collapsed = saved.Collapsed
 	end
+	if type(saved.TeleportPoints) == "table" then
+		sessionState.TeleportPoints = saved.TeleportPoints
+	end
 end
 
 mergeSettings(loadSettings())
 sessionState.Hotkeys = sessionState.Hotkeys or {}
 sessionState.Settings = sessionState.Settings or {}
+sessionState.TeleportPoints = sessionState.TeleportPoints or {}
 
 local saveQueued = false
 
@@ -660,6 +664,7 @@ local function saveSettingsNow()
 		ExpandedPosition = sessionState.ExpandedPosition,
 		CollapsedPosition = sessionState.CollapsedPosition,
 		Collapsed = sessionState.Collapsed,
+		TeleportPoints = sessionState.TeleportPoints,
 	}
 	pcall(function()
 		writefile(settingsFile, HttpService:JSONEncode(payload))
@@ -892,16 +897,19 @@ tabBar.Size = UDim2.new(1, 0, 0, 34)
 tabBar.BackgroundTransparency = 1
 tabBar.Parent = content
 
+local tabWidth = isTouchOnly and 76 or 68
+local tabGap = 4
+
 local function createTab(name, text, xOffset)
 	local button = Instance.new("TextButton")
 	button.Name = name
-	button.Size = UDim2.fromOffset(86, 30)
+button.Size = UDim2.fromOffset(tabWidth, 30)
 	button.Position = UDim2.fromOffset(xOffset, 2)
 	button.BackgroundColor3 = Theme.Button
 	button.BorderSizePixel = 0
 	button.Text = text
 	button.Font = Enum.Font.GothamBold
-	button.TextSize = 14
+button.TextSize = isTouchOnly and 13 or 12
 	button.TextColor3 = Theme.Text
 	button.AutoButtonColor = false
 	button.Parent = tabBar
@@ -910,8 +918,9 @@ local function createTab(name, text, xOffset)
 end
 
 local mainTab = createTab("MainTab", "Main", 0)
-local clickerTab = createTab("ClickerTab", "Clicker", 94)
-local settingsTab = createTab("SettingsTab", "Settings", 188)
+local clickerTab = createTab("ClickerTab", "Clicker", tabWidth + tabGap)
+local teleportTab = createTab("TeleportTab", "Teleport", (tabWidth + tabGap) * 2)
+local settingsTab = createTab("SettingsTab", "Settings", (tabWidth + tabGap) * 3)
 
 local function createPage(name)
 	local scrollingPage = Instance.new("ScrollingFrame")
@@ -938,36 +947,46 @@ end
 
 local page, pageLayout = createPage("MainPage")
 local clickerPage, clickerPageLayout = createPage("ClickerPage")
+local teleportPage, teleportPageLayout = createPage("TeleportPage")
 local settingsPage, settingsPageLayout = createPage("SettingsPage")
 clickerPage.Visible = false
+teleportPage.Visible = false
 settingsPage.Visible = false
 
 local function updateCanvasSize()
 	page.CanvasSize = UDim2.fromOffset(0, pageLayout.AbsoluteContentSize.Y + 8)
 	clickerPage.CanvasSize = UDim2.fromOffset(0, clickerPageLayout.AbsoluteContentSize.Y + 8)
+	teleportPage.CanvasSize = UDim2.fromOffset(0, teleportPageLayout.AbsoluteContentSize.Y + 8)
 	settingsPage.CanvasSize = UDim2.fromOffset(0, settingsPageLayout.AbsoluteContentSize.Y + 8)
 end
 
 local function selectTab(name)
 	local mainActive = name == "Main"
 	local clickerActive = name == "Clicker"
+	local teleportActive = name == "Teleport"
 	local settingsActive = name == "Settings"
 	page.Visible = mainActive
 	clickerPage.Visible = clickerActive
+	teleportPage.Visible = teleportActive
 	settingsPage.Visible = settingsActive
 	mainTab.BackgroundColor3 = mainActive and Theme.AccentDark or Theme.Button
 	clickerTab.BackgroundColor3 = clickerActive and Theme.AccentDark or Theme.Button
+	teleportTab.BackgroundColor3 = teleportActive and Theme.AccentDark or Theme.Button
 	settingsTab.BackgroundColor3 = settingsActive and Theme.AccentDark or Theme.Button
 end
 
 track(pageLayout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(updateCanvasSize))
 track(clickerPageLayout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(updateCanvasSize))
+track(teleportPageLayout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(updateCanvasSize))
 track(settingsPageLayout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(updateCanvasSize))
 track(mainTab.MouseButton1Click:Connect(function()
 	selectTab("Main")
 end))
 track(clickerTab.MouseButton1Click:Connect(function()
 	selectTab("Clicker")
+end))
+track(teleportTab.MouseButton1Click:Connect(function()
+	selectTab("Teleport")
 end))
 track(settingsTab.MouseButton1Click:Connect(function()
 	selectTab("Settings")
@@ -2010,6 +2029,193 @@ track(clickTargetButton.MouseButton1Click:Connect(function()
 	saveClickTargetPosition(clickTargetMarker.Position)
 	saveConfigValue("ClickTargetEnabled")
 end))
+
+local teleportPoints = {}
+if type(sessionState.TeleportPoints) == "table" then
+	for _, savedPoint in ipairs(sessionState.TeleportPoints) do
+		local x = tonumber(savedPoint.X)
+		local y = tonumber(savedPoint.Y)
+		local z = tonumber(savedPoint.Z)
+		if x and y and z and #teleportPoints < 40 then
+			local name = type(savedPoint.Name) == "string" and savedPoint.Name or "Point " .. tostring(#teleportPoints + 1)
+			table.insert(teleportPoints, { Name = string.sub(name, 1, 28), X = x, Y = y, Z = z })
+		end
+	end
+end
+sessionState.TeleportPoints = teleportPoints
+
+local teleportRows = {}
+local function saveTeleportPoints()
+	sessionState.TeleportPoints = teleportPoints
+	queueSaveSettings()
+end
+
+local function teleportToPoint(point)
+	local root, humanoid = getRootAndHumanoid()
+	if not root or not humanoid or humanoid.Health <= 0 then
+		return false
+	end
+	root.CFrame = CFrame.new(point.X, point.Y, point.Z)
+	root.AssemblyLinearVelocity = Vector3.zero
+	root.AssemblyAngularVelocity = Vector3.zero
+	return true
+end
+
+local function renderTeleportPoints()
+	for _, row in ipairs(teleportRows) do
+		row:Destroy()
+	end
+	table.clear(teleportRows)
+
+	if #teleportPoints == 0 then
+		local empty = Instance.new("TextLabel")
+		empty.Name = "EmptyTeleportList"
+		empty.Size = UDim2.new(1, -4, 0, rowHeight)
+		empty.BackgroundTransparency = 1
+		empty.Font = Enum.Font.GothamMedium
+		empty.TextSize = 13
+		empty.TextColor3 = Theme.Muted
+		empty.Text = "No saved markers"
+		empty.LayoutOrder = 4
+		empty.Parent = teleportPage
+		table.insert(teleportRows, empty)
+		updateCanvasSize()
+		return
+	end
+
+	for index, point in ipairs(teleportPoints) do
+		local row = createRow("TeleportPoint_" .. tostring(index), index + 3, teleportPage)
+		local label = Instance.new("TextLabel")
+		label.Size = UDim2.new(1, -150, 1, 0)
+		label.Position = UDim2.fromOffset(12, 0)
+		label.BackgroundTransparency = 1
+		label.Font = Enum.Font.GothamMedium
+		label.TextSize = 13
+		label.TextColor3 = Theme.Text
+		label.TextXAlignment = Enum.TextXAlignment.Left
+		label.Text = point.Name
+		label.Parent = row
+
+		local goButton = Instance.new("TextButton")
+		goButton.Size = UDim2.fromOffset(56, 30)
+		goButton.Position = UDim2.new(1, -140, 0.5, -15)
+		goButton.BackgroundColor3 = Theme.AccentDark
+		goButton.BorderSizePixel = 0
+		goButton.Font = Enum.Font.GothamBold
+		goButton.TextSize = 12
+		goButton.TextColor3 = Theme.Text
+		goButton.Text = "Go"
+		goButton.Parent = row
+		addCorner(goButton, 6)
+		goButton.MouseButton1Click:Connect(function()
+			teleportToPoint(point)
+		end)
+
+		local deleteButton = Instance.new("TextButton")
+		deleteButton.Size = UDim2.fromOffset(64, 30)
+		deleteButton.Position = UDim2.new(1, -76, 0.5, -15)
+		deleteButton.BackgroundColor3 = Theme.Danger
+		deleteButton.BorderSizePixel = 0
+		deleteButton.Font = Enum.Font.GothamBold
+		deleteButton.TextSize = 12
+		deleteButton.TextColor3 = Theme.Text
+		deleteButton.Text = "Delete"
+		deleteButton.Parent = row
+		addCorner(deleteButton, 6)
+		deleteButton.MouseButton1Click:Connect(function()
+			table.remove(teleportPoints, index)
+			saveTeleportPoints()
+			renderTeleportPoints()
+		end)
+
+		table.insert(teleportRows, row)
+	end
+	updateCanvasSize()
+end
+
+local teleportNameRow = createRow("TeleportNameRow", 1, teleportPage)
+local teleportNameLabel = Instance.new("TextLabel")
+teleportNameLabel.Size = UDim2.new(0.5, -12, 1, 0)
+teleportNameLabel.Position = UDim2.fromOffset(12, 0)
+teleportNameLabel.BackgroundTransparency = 1
+teleportNameLabel.Font = Enum.Font.GothamMedium
+teleportNameLabel.TextSize = 14
+teleportNameLabel.TextColor3 = Theme.Text
+teleportNameLabel.TextXAlignment = Enum.TextXAlignment.Left
+teleportNameLabel.Text = "Marker name"
+teleportNameLabel.Parent = teleportNameRow
+
+local teleportNameBox = Instance.new("TextBox")
+teleportNameBox.Size = UDim2.fromOffset(126, 30)
+teleportNameBox.Position = UDim2.new(1, -138, 0.5, -15)
+teleportNameBox.BackgroundColor3 = Theme.PanelSoft
+teleportNameBox.BorderSizePixel = 0
+teleportNameBox.Font = Enum.Font.GothamMedium
+teleportNameBox.TextSize = 13
+teleportNameBox.TextColor3 = Theme.Text
+teleportNameBox.PlaceholderColor3 = Theme.Muted
+teleportNameBox.PlaceholderText = "Point name"
+teleportNameBox.ClearTextOnFocus = false
+teleportNameBox.Parent = teleportNameRow
+addCorner(teleportNameBox, 6)
+
+local teleportAddRow = createRow("TeleportAddRow", 2, teleportPage)
+local teleportAddLabel = Instance.new("TextLabel")
+teleportAddLabel.Size = UDim2.new(1, -100, 1, 0)
+teleportAddLabel.Position = UDim2.fromOffset(12, 0)
+teleportAddLabel.BackgroundTransparency = 1
+teleportAddLabel.Font = Enum.Font.GothamMedium
+teleportAddLabel.TextSize = 14
+teleportAddLabel.TextColor3 = Theme.Text
+teleportAddLabel.TextXAlignment = Enum.TextXAlignment.Left
+teleportAddLabel.Text = "Save current position"
+teleportAddLabel.Parent = teleportAddRow
+
+local teleportAddButton = Instance.new("TextButton")
+teleportAddButton.Size = UDim2.fromOffset(82, 30)
+teleportAddButton.Position = UDim2.new(1, -94, 0.5, -15)
+teleportAddButton.BackgroundColor3 = Theme.AccentDark
+teleportAddButton.BorderSizePixel = 0
+teleportAddButton.Font = Enum.Font.GothamBold
+teleportAddButton.TextSize = 13
+teleportAddButton.TextColor3 = Theme.Text
+teleportAddButton.Text = "Add"
+teleportAddButton.Parent = teleportAddRow
+addCorner(teleportAddButton, 6)
+teleportAddButton.MouseButton1Click:Connect(function()
+	local root, humanoid = getRootAndHumanoid()
+	if not root or not humanoid or humanoid.Health <= 0 or #teleportPoints >= 40 then
+		return
+	end
+	local name = string.match(teleportNameBox.Text, "^%s*(.-)%s*$")
+	if not name or name == "" then
+		name = "Point " .. tostring(#teleportPoints + 1)
+	end
+	name = string.sub(name, 1, 28)
+	local position = root.Position
+	table.insert(teleportPoints, {
+		Name = name,
+		X = math.floor(position.X * 100) / 100,
+		Y = math.floor(position.Y * 100) / 100,
+		Z = math.floor(position.Z * 100) / 100,
+	})
+	teleportNameBox.Text = ""
+	saveTeleportPoints()
+	renderTeleportPoints()
+end)
+
+local teleportListLabel = Instance.new("TextLabel")
+teleportListLabel.Size = UDim2.new(1, -4, 0, 22)
+teleportListLabel.BackgroundTransparency = 1
+teleportListLabel.Font = Enum.Font.GothamBold
+teleportListLabel.TextSize = 13
+teleportListLabel.TextColor3 = Theme.Muted
+teleportListLabel.TextXAlignment = Enum.TextXAlignment.Left
+teleportListLabel.Text = "Saved markers"
+teleportListLabel.LayoutOrder = 3
+teleportListLabel.Parent = teleportPage
+
+renderTeleportPoints()
 
 local bindingHotkey = nil
 local hotkeyBindings = {}
