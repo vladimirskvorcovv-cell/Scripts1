@@ -897,19 +897,16 @@ tabBar.Size = UDim2.new(1, 0, 0, 34)
 tabBar.BackgroundTransparency = 1
 tabBar.Parent = content
 
-local tabWidth = isTouchOnly and 76 or 68
-local tabGap = 4
-
-local function createTab(name, text, xOffset)
+local function createTab(name, text, index)
 	local button = Instance.new("TextButton")
 	button.Name = name
-button.Size = UDim2.fromOffset(tabWidth, 30)
-	button.Position = UDim2.fromOffset(xOffset, 2)
+	button.Size = UDim2.new(0.25, -3, 0, 30)
+	button.Position = UDim2.new(index * 0.25, index, 0, 2)
 	button.BackgroundColor3 = Theme.Button
 	button.BorderSizePixel = 0
 	button.Text = text
 	button.Font = Enum.Font.GothamBold
-button.TextSize = isTouchOnly and 13 or 12
+	button.TextSize = isTouchOnly and 13 or 12
 	button.TextColor3 = Theme.Text
 	button.AutoButtonColor = false
 	button.Parent = tabBar
@@ -918,9 +915,9 @@ button.TextSize = isTouchOnly and 13 or 12
 end
 
 local mainTab = createTab("MainTab", "Main", 0)
-local clickerTab = createTab("ClickerTab", "Clicker", tabWidth + tabGap)
-local teleportTab = createTab("TeleportTab", "Teleport", (tabWidth + tabGap) * 2)
-local settingsTab = createTab("SettingsTab", "Settings", (tabWidth + tabGap) * 3)
+local clickerTab = createTab("ClickerTab", "Clicker", 1)
+local teleportTab = createTab("TeleportTab", "Teleport", 2)
+local settingsTab = createTab("SettingsTab", "Settings", 3)
 
 local function createPage(name)
 	local scrollingPage = Instance.new("ScrollingFrame")
