@@ -1226,6 +1226,11 @@ local function isESPVisible(character)
 		return true
 	end
 
+	local _, onScreen = camera:WorldToViewportPoint(targetPart.Position)
+	if not onScreen then
+		return true
+	end
+
 	local ignoreList = { character }
 	local localCharacter = LocalPlayer.Character
 	if localCharacter then
@@ -1415,7 +1420,7 @@ function ESP.start()
 			for player in pairs(ESP._highlights) do
 				updateESPColor(player)
 			end
-			task.wait(0.5)
+			task.wait(1.5)
 		end
 	end)
 
