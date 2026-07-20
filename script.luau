@@ -1096,6 +1096,7 @@ clickTargetMarker.Position = saveClickTargetPosition(clickTargetMarker.Position)
 local ESP = {
 	Enabled = false,
 	_highlights = {},
+	_baseColors = {},
 	_playerConnections = {},
 	_humanoidConnections = {},
 	_playerAdded = nil,
@@ -1249,18 +1250,30 @@ local function isESPVisible(character)
 	return Workspace:Raycast(camera.CFrame.Position, direction, params) == nil
 end
 
-local function updateESPColor(player)
+local function updateESPColor(player, refreshBaseColor)
 	local highlight = ESP._highlights[player]
 	if not highlight then
 		return
 	end
 
-	local fillColor, outlineColor, teamColor = getESPColors(player, player.Character)
+	local baseColors = ESP._baseColors[player]
+	if refreshBaseColor or not baseColors then
+		local fillColor, outlineColor, teamColor = getESPColors(player, player.Character)
+		baseColors = {
+			fillColor = fillColor,
+			outlineColor = outlineColor,
+			teamColor = teamColor,
+		}
+		ESP._baseColors[player] = baseColors
+	end
+
+	local fillColor = baseColors.fillColor
+	local outlineColor = baseColors.outlineColor
 	if not isESPVisible(player.Character) then
-		if teamColor == "red" then
+		if baseColors.teamColor == "red" then
 			fillColor = espRedOccludedFillColor
 			outlineColor = espRedOccludedOutlineColor
-		elseif teamColor == "blue" then
+		elseif baseColors.teamColor == "blue" then
 			fillColor = espBlueOccludedFillColor
 			outlineColor = espBlueOccludedOutlineColor
 		end
@@ -1310,6 +1323,7 @@ local function removeEspHighlight(player)
 	if highlight then
 		highlight:Destroy()
 		ESP._highlights[player] = nil
+	ESP._baseColors[player] = nil
 	end
 end
 
@@ -1323,7 +1337,7 @@ local function applyESPToPlayer(player)
 	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
 
 	if character and humanoid and humanoid.Health > 0 then
-		updateESPColor(player)
+		updateESPColor(player, true)
 		highlight.Adornee = character
 		highlight.Enabled = true
 		disconnect(ESP._humanoidConnections[player])
@@ -1345,13 +1359,13 @@ local function bindESPPlayer(player)
 
 	ESP._playerConnections[player] = {
 		player.AttributeChanged:Connect(function()
-			updateESPColor(player)
+			updateESPColor(player, true)
 		end),
 		player:GetPropertyChangedSignal("Team"):Connect(function()
-			updateESPColor(player)
+			updateESPColor(player, true)
 		end),
 		player:GetPropertyChangedSignal("TeamColor"):Connect(function()
-			updateESPColor(player)
+			updateESPColor(player, true)
 		end),
 		player.CharacterAdded:Connect(function(character)
 			task.defer(function()
@@ -1401,7 +1415,7 @@ function ESP.start()
 			for player in pairs(ESP._highlights) do
 				updateESPColor(player)
 			end
-			task.wait(0.2)
+			task.wait(0.5)
 		end
 	end)
 
@@ -1425,6 +1439,7 @@ function ESP.stop()
 	for player in pairs(ESP._highlights) do
 		removeEspHighlight(player)
 	end
+	table.clear(ESP._baseColors)
 
 	return true
 end
@@ -2747,3 +2762,4 @@ track(screenGui.Destroying:Connect(function()
 	saveSettingsNow()
 	table.clear(uiConnections)
 end))
+
