@@ -593,7 +593,13 @@ function Invisibility.toggle(state)
 	return Invisibility.apply(state)
 end
 
-local storage = (getgenv and getgenv()) or _G
+local storage = _G
+if type(getgenv) == "function" then
+	local ok, environment = pcall(getgenv)
+	if ok and type(environment) == "table" then
+		storage = environment
+	end
+end
 storage.FlyAntiAFK_State = storage.FlyAntiAFK_State or {}
 local sessionState = storage.FlyAntiAFK_State
 local settingsFile = "FlyAntiAFK_Settings.json"
@@ -725,7 +731,14 @@ local function saveConfigValue(configKey)
 	queueSaveSettings()
 end
 
-local guiParent = (gethui and gethui()) or LocalPlayer:WaitForChild("PlayerGui")
+local guiParent = nil
+if type(gethui) == "function" then
+	local ok, parent = pcall(gethui)
+	if ok and typeof(parent) == "Instance" then
+		guiParent = parent
+	end
+end
+guiParent = guiParent or LocalPlayer:WaitForChild("PlayerGui")
 local existing = guiParent:FindFirstChild("FlyAntiAFK_GUI")
 if existing then
 	existing:Destroy()
@@ -1795,6 +1808,13 @@ local function createSwitch(text, order, onChanged, parentPage)
 		enabled = state == true
 		render(true)
 
+		if type(onChanged) ~= "function" then
+			enabled = previous
+			render(true)
+			busy = false
+			return
+		end
+
 		local ok, result, message = pcall(onChanged, enabled)
 		if not ok or result == false then
 			enabled = previous
@@ -2706,3 +2726,4 @@ track(screenGui.Destroying:Connect(function()
 	saveSettingsNow()
 	table.clear(uiConnections)
 end))
+
